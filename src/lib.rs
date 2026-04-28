@@ -2,7 +2,7 @@ mod error;
 mod factory;
 
 pub use error::BuildError;
-pub use factory::{DependencyFactory, DependencyFactoryHandle};
+pub use factory::{DependencyFactory, DependencyFactoryHandle, Singleton};
 
 #[cfg(test)]
 mod tests {

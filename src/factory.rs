@@ -119,6 +119,18 @@ impl DependencyFactory {
         self.inner
             .get_keyed::<SingletonKey<R>, R>(&SingletonKey::<R>::new())
     }
+
+    /// Resolve the singleton instance of `R`, building it if it is not
+    /// already cached. Recursive `build` calls inside `R::build` see the
+    /// same factory through a [`DependencyFactoryHandle`].
+    pub fn build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
+        if let Some(arc) = self.get::<R>() {
+            return Ok(arc);
+        }
+        let value = R::build(&self.handle())
+            .map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
+        Ok(self.insert(value))
+    }
 }
 
 impl Default for DependencyFactory {
@@ -157,4 +169,30 @@ impl DependencyFactoryHandle {
         let inner = self.upgrade()?;
         Ok(inner.get_keyed::<SingletonKey<R>, R>(&SingletonKey::<R>::new()))
     }
+
+    /// Resolve the singleton instance of `R`, building it if it is not
+    /// already cached. Returns [`BuildError::factory_dropped`] if the
+    /// owning factory is gone.
+    pub fn build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
+        let inner = self.upgrade()?;
+        let key = SingletonKey::<R>::new();
+        if let Some(arc) = inner.get_keyed::<SingletonKey<R>, R>(&key) {
+            return Ok(arc);
+        }
+        let value =
+            R::build(self).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
+        Ok(inner.insert_keyed(key, value))
+    }
+}
+
+/// A resource identified solely by its type. At most one instance per type
+/// lives in a given factory. Implementors describe how to construct the
+/// resource from the factory's handle, which they may use to resolve
+/// transitive dependencies.
+///
+/// `build` must be cheap and side-effect-free: no I/O, no blocking, no
+/// contended locking. Expensive setup belongs in async lifecycle hooks
+/// (added later) or in the resource's own methods, not here.
+pub trait Singleton: Send + Sync + Sized + 'static {
+    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError>;
 }
