@@ -131,6 +131,29 @@ impl DependencyFactory {
             .map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
         Ok(self.insert(value))
     }
+
+    /// Pre-populate the cached output for `query`. Overwrites any existing
+    /// entry for the same key. Returns the cached `Arc<Q::Output>`.
+    pub fn insert_for<Q: Query>(&self, query: Q, value: Q::Output) -> Arc<Q::Output> {
+        self.inner.insert_keyed(query, value)
+    }
+
+    /// Return the cached output for `query`, if one is present.
+    pub fn get_for<Q: Query>(&self, query: Q) -> Option<Arc<Q::Output>> {
+        self.inner.get_keyed::<Q, Q::Output>(&query)
+    }
+
+    /// Resolve the output for `query`, building it via `Q::build` if it is
+    /// not already cached.
+    pub fn build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Output>, BuildError> {
+        if let Some(arc) = self.get_for(query.clone()) {
+            return Ok(arc);
+        }
+        let value = query
+            .build(&self.handle())
+            .map_err(|e| e.push_frame(std::any::type_name::<Q::Output>()))?;
+        Ok(self.insert_for(query, value))
+    }
 }
 
 impl Default for DependencyFactory {
@@ -183,6 +206,43 @@ impl DependencyFactoryHandle {
             R::build(self).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
         Ok(inner.insert_keyed(key, value))
     }
+
+    /// Pre-populate the cached output for `query`. Overwrites any existing
+    /// entry for the same key. Returns [`BuildError::factory_dropped`] if
+    /// the owning factory is gone.
+    pub fn insert_for<Q: Query>(
+        &self,
+        query: Q,
+        value: Q::Output,
+    ) -> Result<Arc<Q::Output>, BuildError> {
+        let inner = self.upgrade()?;
+        Ok(inner.insert_keyed(query, value))
+    }
+
+    /// Return the cached output for `query`, if one is present.
+    /// `Ok(None)` means the factory is alive but no output is cached for
+    /// this key; `Err(_)` means the factory itself has been dropped.
+    pub fn get_for<Q: Query>(
+        &self,
+        query: Q,
+    ) -> Result<Option<Arc<Q::Output>>, BuildError> {
+        let inner = self.upgrade()?;
+        Ok(inner.get_keyed::<Q, Q::Output>(&query))
+    }
+
+    /// Resolve the output for `query`, building it via `Q::build` if it is
+    /// not already cached. Returns [`BuildError::factory_dropped`] if the
+    /// owning factory is gone.
+    pub fn build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Output>, BuildError> {
+        let inner = self.upgrade()?;
+        if let Some(arc) = inner.get_keyed::<Q, Q::Output>(&query) {
+            return Ok(arc);
+        }
+        let value = query
+            .build(self)
+            .map_err(|e| e.push_frame(std::any::type_name::<Q::Output>()))?;
+        Ok(inner.insert_keyed(query, value))
+    }
 }
 
 /// A resource identified solely by its type. At most one instance per type
@@ -195,4 +255,21 @@ impl DependencyFactoryHandle {
 /// (added later) or in the resource's own methods, not here.
 pub trait Singleton: Send + Sync + Sized + 'static {
     fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError>;
+}
+
+/// A keyed resource: the implementor is the key value, and `Output` is the
+/// resource produced for that key. Multiple instances per output type may
+/// coexist, distinguished by the key value. Calling `build_for(key)` on the
+/// factory caches the produced output under that key.
+///
+/// `build` must be cheap and side-effect-free: no I/O, no blocking, no
+/// contended locking. Expensive setup belongs in async lifecycle hooks
+/// (added later) or in the resource's own methods, not here.
+pub trait Query: Hash + Eq + Clone + Send + Sync + 'static {
+    type Output: Send + Sync + 'static;
+
+    fn build(
+        &self,
+        factory: &DependencyFactoryHandle,
+    ) -> Result<Self::Output, BuildError>;
 }
