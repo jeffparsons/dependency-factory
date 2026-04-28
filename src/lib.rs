@@ -1,7 +1,7 @@
 mod error;
 mod factory;
 
-pub use error::BuildError;
+pub use error::{BuildError, CycleError};
 pub use factory::{DependencyFactory, DependencyFactoryHandle, Query, Singleton};
 
 #[cfg(test)]

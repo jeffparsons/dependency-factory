@@ -1,10 +1,11 @@
 use std::any::{Any, TypeId};
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::error::BuildError;
+use crate::error::{BuildError, CycleError};
 
 /// Private nil-query adapter: identifies "the singleton instance of `R`"
 /// as a query key carrying no information. Singletons share storage with
@@ -82,6 +83,99 @@ impl Inner {
             .expect("stored map had a different value type than expected for this query type");
         map.get(key).cloned()
     }
+
+    /// Insert `value` under `key` only if the slot is currently empty,
+    /// returning whichever `Arc` ends up cached. Used by the build path
+    /// so concurrent builders of the same key converge on a single
+    /// shared `Arc`.
+    fn insert_if_absent<Q, V>(&self, key: Q, value: V) -> Arc<V>
+    where
+        Q: Hash + Eq + Clone + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        let arc = Arc::new(value);
+        let mut by_qtype = self.by_query_type.lock().unwrap();
+        let entry = by_qtype
+            .entry(TypeId::of::<Q>())
+            .or_insert_with(|| Box::new(KeyMap::<Q, V>::new()));
+        let map = entry
+            .downcast_mut::<KeyMap<Q, V>>()
+            .expect("stored map had a different value type than expected for this query type");
+        map.entry(key).or_insert(arc).clone()
+    }
+}
+
+thread_local! {
+    static IN_PROGRESS: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+}
+
+/// One entry on the per-thread "currently building" breadcrumb. Carries a
+/// factory identifier so frames produced by different factories on the
+/// same call stack do not look like cycles, plus a hashed key value so
+/// different keys of the same query type are distinguished.
+#[derive(Clone, Copy)]
+struct Frame {
+    factory: usize,
+    type_id: TypeId,
+    key_hash: u64,
+    type_name: &'static str,
+}
+
+impl Frame {
+    fn singleton<R: 'static>(inner: &Arc<Inner>) -> Self {
+        Self {
+            factory: Arc::as_ptr(inner) as usize,
+            type_id: TypeId::of::<SingletonKey<R>>(),
+            key_hash: 0,
+            type_name: std::any::type_name::<R>(),
+        }
+    }
+
+    fn query<Q: Query>(inner: &Arc<Inner>, key: &Q) -> Self {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        Self {
+            factory: Arc::as_ptr(inner) as usize,
+            type_id: TypeId::of::<Q>(),
+            key_hash: hasher.finish(),
+            type_name: std::any::type_name::<Q::Output>(),
+        }
+    }
+}
+
+/// RAII guard around the thread-local breadcrumb. `enter` returns a
+/// `BuildError` carrying a `CycleError` source if the same frame is
+/// already on the stack; otherwise the new frame is pushed and popped
+/// again on drop.
+struct CycleGuard;
+
+impl CycleGuard {
+    fn enter(frame: Frame) -> Result<Self, BuildError> {
+        IN_PROGRESS.with(|cell| -> Result<(), BuildError> {
+            let mut breadcrumb = cell.borrow_mut();
+            if let Some(start) = breadcrumb.iter().position(|f| {
+                f.factory == frame.factory
+                    && f.type_id == frame.type_id
+                    && f.key_hash == frame.key_hash
+            }) {
+                let mut path: Vec<&'static str> =
+                    breadcrumb[start..].iter().map(|f| f.type_name).collect();
+                path.push(frame.type_name);
+                return Err(CycleError::new(path).into());
+            }
+            breadcrumb.push(frame);
+            Ok(())
+        })?;
+        Ok(CycleGuard)
+    }
+}
+
+impl Drop for CycleGuard {
+    fn drop(&mut self) {
+        IN_PROGRESS.with(|cell| {
+            cell.borrow_mut().pop();
+        });
+    }
 }
 
 /// The owning factory. Holds the storage alive; dropping it tears the
@@ -127,9 +221,10 @@ impl DependencyFactory {
         if let Some(arc) = self.get::<R>() {
             return Ok(arc);
         }
+        let _guard = CycleGuard::enter(Frame::singleton::<R>(&self.inner))?;
         let value = R::build(&self.handle())
             .map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
-        Ok(self.insert(value))
+        Ok(self.inner.insert_if_absent(SingletonKey::<R>::new(), value))
     }
 
     /// Pre-populate the cached output for `query`. Overwrites any existing
@@ -149,10 +244,11 @@ impl DependencyFactory {
         if let Some(arc) = self.get_for(query.clone()) {
             return Ok(arc);
         }
+        let _guard = CycleGuard::enter(Frame::query::<Q>(&self.inner, &query))?;
         let value = query
             .build(&self.handle())
             .map_err(|e| e.push_frame(std::any::type_name::<Q::Output>()))?;
-        Ok(self.insert_for(query, value))
+        Ok(self.inner.insert_if_absent(query, value))
     }
 }
 
@@ -202,9 +298,10 @@ impl DependencyFactoryHandle {
         if let Some(arc) = inner.get_keyed::<SingletonKey<R>, R>(&key) {
             return Ok(arc);
         }
+        let _guard = CycleGuard::enter(Frame::singleton::<R>(&inner))?;
         let value =
             R::build(self).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
-        Ok(inner.insert_keyed(key, value))
+        Ok(inner.insert_if_absent(key, value))
     }
 
     /// Pre-populate the cached output for `query`. Overwrites any existing
@@ -238,10 +335,11 @@ impl DependencyFactoryHandle {
         if let Some(arc) = inner.get_keyed::<Q, Q::Output>(&query) {
             return Ok(arc);
         }
+        let _guard = CycleGuard::enter(Frame::query::<Q>(&inner, &query))?;
         let value = query
             .build(self)
             .map_err(|e| e.push_frame(std::any::type_name::<Q::Output>()))?;
-        Ok(inner.insert_keyed(query, value))
+        Ok(inner.insert_if_absent(query, value))
     }
 }
 

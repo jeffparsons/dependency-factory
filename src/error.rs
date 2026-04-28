@@ -86,3 +86,39 @@ impl fmt::Display for FactoryDropped {
 }
 
 impl Error for FactoryDropped {}
+
+/// A dependency cycle detected during recursive resolution. Carried as
+/// the source of a [`BuildError`] when a cycle is the root cause; users
+/// can recognise it via `err.source().downcast_ref::<CycleError>()`.
+#[derive(Debug)]
+pub struct CycleError {
+    path: Vec<&'static str>,
+}
+
+impl CycleError {
+    pub(crate) fn new(path: Vec<&'static str>) -> Self {
+        Self { path }
+    }
+
+    /// The resource type names along the detected cycle, starting at the
+    /// resource where the cycle begins and ending with the same resource
+    /// where the cycle closes.
+    pub fn path(&self) -> &[&'static str] {
+        &self.path
+    }
+}
+
+impl fmt::Display for CycleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("dependency cycle detected: ")?;
+        for (i, name) in self.path.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" -> ")?;
+            }
+            f.write_str(name)?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for CycleError {}
