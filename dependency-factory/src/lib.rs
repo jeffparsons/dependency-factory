@@ -4,6 +4,9 @@ mod factory;
 pub use error::{BuildError, CycleError};
 pub use factory::{DependencyFactory, DependencyFactoryHandle, Query, Singleton};
 
+#[cfg(feature = "derive")]
+pub use dependency_factory_derive::Singleton;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

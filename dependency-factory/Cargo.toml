@@ -1,0 +1,11 @@
+[package]
+name = "dependency-factory"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["derive"]
+derive = ["dep:dependency-factory-derive"]
+
+[dependencies]
+dependency-factory-derive = { version = "0.1.0", path = "../dependency-factory-derive", optional = true }
