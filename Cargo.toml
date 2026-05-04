@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "dependency-factory",
     "dependency-factory-derive",
+    "xtask",
 ]
 
 [workspace.package]
