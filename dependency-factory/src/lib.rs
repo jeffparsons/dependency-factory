@@ -85,10 +85,7 @@ mod tests {
     impl Query for StringKey {
         type Output = String;
 
-        fn build(
-            &self,
-            _factory: &DependencyFactoryHandle,
-        ) -> Result<String, BuildError> {
+        fn build(&self, _factory: &DependencyFactoryHandle) -> Result<String, BuildError> {
             Ok(format!("built-{}", self.0))
         }
     }

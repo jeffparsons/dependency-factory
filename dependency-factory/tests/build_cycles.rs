@@ -260,8 +260,7 @@ fn concurrent_builds_of_same_key_converge_on_one_arc() {
             factory.build::<Slowish>().unwrap()
         }));
     }
-    let arcs: Vec<Arc<Slowish>> =
-        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let arcs: Vec<Arc<Slowish>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert!(Arc::ptr_eq(&arcs[0], &arcs[1]));
     assert_eq!(arcs[0].counter, 0);
 }

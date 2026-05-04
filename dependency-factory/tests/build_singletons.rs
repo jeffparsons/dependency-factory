@@ -109,7 +109,11 @@ fn errors_carry_a_chain_of_frames() {
     let err = factory.build::<DependsOnFailing>().unwrap_err();
     let chain = err.chain();
     assert_eq!(chain.len(), 2);
-    assert!(chain[0].ends_with("Failing"), "innermost frame: {}", chain[0]);
+    assert!(
+        chain[0].ends_with("Failing"),
+        "innermost frame: {}",
+        chain[0]
+    );
     assert!(
         chain[1].ends_with("DependsOnFailing"),
         "outermost frame: {}",

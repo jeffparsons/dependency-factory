@@ -36,10 +36,7 @@ struct ServiceKey(&'static str);
 impl Query for ServiceKey {
     type Output = Service;
 
-    fn build(
-        &self,
-        factory: &DependencyFactoryHandle,
-    ) -> Result<Service, BuildError> {
+    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Service, BuildError> {
         Ok(Service {
             db: factory.build_for(DbKey(self.0))?,
             label: self.0,
@@ -125,10 +122,7 @@ struct DependsOnFailingKey;
 impl Query for DependsOnFailingKey {
     type Output = DependsOnFailing;
 
-    fn build(
-        &self,
-        factory: &DependencyFactoryHandle,
-    ) -> Result<DependsOnFailing, BuildError> {
+    fn build(&self, factory: &DependencyFactoryHandle) -> Result<DependsOnFailing, BuildError> {
         Ok(DependsOnFailing {
             f: factory.build_for(FailingKey)?,
         })
@@ -141,7 +135,11 @@ fn errors_carry_chain_of_output_type_names() {
     let err = factory.build_for(DependsOnFailingKey).unwrap_err();
     let chain = err.chain();
     assert_eq!(chain.len(), 2);
-    assert!(chain[0].ends_with("Failing"), "innermost frame: {}", chain[0]);
+    assert!(
+        chain[0].ends_with("Failing"),
+        "innermost frame: {}",
+        chain[0]
+    );
     assert!(
         chain[1].ends_with("DependsOnFailing"),
         "outermost frame: {}",
@@ -172,10 +170,7 @@ struct TimedDbKey(&'static str);
 impl Query for TimedDbKey {
     type Output = TimedDb;
 
-    fn build(
-        &self,
-        factory: &DependencyFactoryHandle,
-    ) -> Result<TimedDb, BuildError> {
+    fn build(&self, factory: &DependencyFactoryHandle) -> Result<TimedDb, BuildError> {
         Ok(TimedDb {
             _clock: factory.build::<Clock>()?,
             name: self.0.into(),

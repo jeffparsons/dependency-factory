@@ -222,8 +222,8 @@ impl DependencyFactory {
             return Ok(arc);
         }
         let _guard = CycleGuard::enter(Frame::singleton::<R>(&self.inner))?;
-        let value = R::build(&self.handle())
-            .map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
+        let value =
+            R::build(&self.handle()).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
         Ok(self.inner.insert_if_absent(SingletonKey::<R>::new(), value))
     }
 
@@ -299,8 +299,7 @@ impl DependencyFactoryHandle {
             return Ok(arc);
         }
         let _guard = CycleGuard::enter(Frame::singleton::<R>(&inner))?;
-        let value =
-            R::build(self).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
+        let value = R::build(self).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
         Ok(inner.insert_if_absent(key, value))
     }
 
@@ -319,10 +318,7 @@ impl DependencyFactoryHandle {
     /// Return the cached output for `query`, if one is present.
     /// `Ok(None)` means the factory is alive but no output is cached for
     /// this key; `Err(_)` means the factory itself has been dropped.
-    pub fn get_for<Q: Query>(
-        &self,
-        query: Q,
-    ) -> Result<Option<Arc<Q::Output>>, BuildError> {
+    pub fn get_for<Q: Query>(&self, query: Q) -> Result<Option<Arc<Q::Output>>, BuildError> {
         let inner = self.upgrade()?;
         Ok(inner.get_keyed::<Q, Q::Output>(&query))
     }
@@ -366,8 +362,5 @@ pub trait Singleton: Send + Sync + Sized + 'static {
 pub trait Query: Hash + Eq + Clone + Send + Sync + 'static {
     type Output: Send + Sync + 'static;
 
-    fn build(
-        &self,
-        factory: &DependencyFactoryHandle,
-    ) -> Result<Self::Output, BuildError>;
+    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Self::Output, BuildError>;
 }
