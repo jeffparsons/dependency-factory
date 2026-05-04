@@ -1,13 +1,19 @@
 [package]
 name = "dependency-factory"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.91"
-license = "MIT OR Apache-2.0"
+description = "Type-safe dependency-injection container with auto-building of singletons and query-keyed resources."
+readme = "../README.md"
+keywords = ["dependency-injection", "di", "container", "factory", "singleton"]
+categories = ["rust-patterns"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [features]
 default = ["derive"]
 derive = ["dep:dependency-factory-derive"]
 
 [dependencies]
-dependency-factory-derive = { version = "0.1.0", path = "../dependency-factory-derive", optional = true }
+dependency-factory-derive = { version = "=0.1.0", path = "../dependency-factory-derive", optional = true }
