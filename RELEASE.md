@@ -23,10 +23,14 @@ lockstep at the same version.
    manifest and changelog agree).
 4. **Tag.** `git tag -a vX.Y.Z -m "Release vX.Y.Z"` and `git push origin
    vX.Y.Z`.
-5. **CI publishes.** The tag push triggers
-   `.github/workflows/release.yml`, which calls
-   `cargo xtask release verify-tag`, re-runs the CI suite, calls
-   `cargo xtask release publish` (derive then lib in order, with a
+5. **Approve the deployment.** The tag push triggers
+   `.github/workflows/release.yml`, which re-runs the CI suite (by
+   calling `ci.yml`) and then waits for approval on the `release`
+   environment. Approve it from the workflow run page.
+6. **CI publishes.** The release job calls
+   `cargo xtask release verify-tag`, gets a short-lived crates.io token
+   via [trusted publishing](https://crates.io/docs/trusted-publishing),
+   calls `cargo xtask release publish` (derive then lib in order, with a
    crates.io indexing wait between), and creates a GitHub Release whose
    body is `cargo xtask release notes X.Y.Z`.
 
@@ -64,8 +68,13 @@ on an older minor.
 
 These should already be in place before the first release.
 
-- A `CARGO_REGISTRY_TOKEN` repository secret with publish rights to both
-  crates on crates.io. Mint at <https://crates.io/me>; add at
-  `Settings → Secrets and variables → Actions → New repository secret`.
-- Both crates exist on crates.io. The very first release publishes them;
-  subsequent releases update them.
+- Both crates exist on crates.io. Trusted publishing can only be
+  configured for a crate that already exists, so each crate was first
+  published by hand as an empty `0.0.0` placeholder.
+- Each crate has a trusted publisher on crates.io (crate page →
+  `Settings → Trusted Publishing`) for repository
+  `jeffparsons/dependency-factory`, workflow `release.yml` and
+  environment `release`. The workflow file name is part of the
+  configuration, so renaming `release.yml` breaks publishing.
+- A `release` environment exists in the GitHub repository
+  (`Settings → Environments`) with a required reviewer.
