@@ -21,6 +21,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - New `Key` trait pairs a key type with its value type. `Query: Key` keeps
   only `build`; `Query::Output` is now `Key::Value`. `get_for` takes the
   key by reference.
+- `build` and `build_for` on the factory and handle are renamed
+  `get_or_build` and `get_or_build_for`, since they return a cached value
+  when there is one. The trait methods `Singleton::build` and
+  `Query::build`, which always construct, keep their names.
 
 ### Added
 - `DependencyFactory` and `DependencyFactoryHandle`: type-keyed

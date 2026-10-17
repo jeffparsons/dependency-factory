@@ -79,45 +79,19 @@ impl Drop for CycleGuard {
     }
 }
 
-/// Resolve the singleton `R` against `registry`, building it if absent.
-fn build_singleton<R: Singleton>(
-    registry: &Arc<Registry>,
-    handle: &DependencyFactoryHandle,
-) -> Result<Arc<R>, BuildError> {
-    if let Some(arc) = registry.get::<R>() {
-        return Ok(arc);
-    }
-    let _guard = CycleGuard::enter(Frame::singleton::<R>(registry))?;
-    let value = R::build(handle).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
-    Ok(registry.get_or_insert_with(|| value))
-}
-
-/// Resolve `query` against `registry`, building its value if absent.
-fn build_query<Q: Query>(
-    registry: &Arc<Registry>,
-    handle: &DependencyFactoryHandle,
-    query: Q,
-) -> Result<Arc<Q::Value>, BuildError> {
-    if let Some(arc) = registry.get_for(&query) {
-        return Ok(arc);
-    }
-    let _guard = CycleGuard::enter(Frame::query(registry, &query))?;
-    let value = query
-        .build(handle)
-        .map_err(|e| e.push_frame(std::any::type_name::<Q::Value>()))?;
-    Ok(registry.get_or_insert_with_for(query, || value))
-}
-
 /// The owning factory. Holds its [`Registry`] alive; dropping it tears the
 /// factory down. Most code should pass [`DependencyFactoryHandle`] around
 /// instead, and reach for `DependencyFactory` only at the application's
 /// top level where ownership lives.
 ///
-/// The factory is one client of its registry: `build` reads the registry
-/// to short-circuit and commits what it builds through
+/// The factory is one client of its registry: `get_or_build` reads the
+/// registry to short-circuit and commits what it builds through
 /// [`Registry::get_or_insert_with`]. Anything else may populate the same
 /// registry directly via [`registry`](Self::registry); a value already
 /// present always wins over one the factory would build.
+///
+/// Every operation forwards to a [`DependencyFactoryHandle`]; the owning
+/// type only adds the guarantee that the handle's upgrade succeeds.
 pub struct DependencyFactory {
     registry: Arc<Registry>,
 }
@@ -154,11 +128,12 @@ impl DependencyFactory {
         self.registry.get::<R>()
     }
 
-    /// Resolve the singleton instance of `R`, building it if it is not
-    /// already cached. Recursive `build` calls inside `R::build` see the
-    /// same factory through a [`DependencyFactoryHandle`].
-    pub fn build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
-        build_singleton(&self.registry, &self.handle())
+    /// Return the singleton instance of `R`, building it via `R::build`
+    /// if it is not already cached. Recursive `get_or_build` calls inside
+    /// `R::build` see the same factory through a
+    /// [`DependencyFactoryHandle`].
+    pub fn get_or_build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
+        self.handle().get_or_build()
     }
 
     /// Return the cached value for `query`, if one is present.
@@ -166,10 +141,10 @@ impl DependencyFactory {
         self.registry.get_for(query)
     }
 
-    /// Resolve the value for `query`, building it via `Q::build` if it is
+    /// Return the value for `query`, building it via `Q::build` if it is
     /// not already cached.
-    pub fn build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
-        build_query(&self.registry, &self.handle(), query)
+    pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
+        self.handle().get_or_build_for(query)
     }
 }
 
@@ -209,11 +184,17 @@ impl DependencyFactoryHandle {
         Ok(self.upgrade()?.get::<R>())
     }
 
-    /// Resolve the singleton instance of `R`, building it if it is not
-    /// already cached. Returns [`BuildError::factory_dropped`] if the
-    /// owning factory is gone.
-    pub fn build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
-        build_singleton(&self.upgrade()?, self)
+    /// Return the singleton instance of `R`, building it via `R::build`
+    /// if it is not already cached. Returns
+    /// [`BuildError::factory_dropped`] if the owning factory is gone.
+    pub fn get_or_build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
+        let registry = self.upgrade()?;
+        if let Some(arc) = registry.get::<R>() {
+            return Ok(arc);
+        }
+        let _guard = CycleGuard::enter(Frame::singleton::<R>(&registry))?;
+        let value = R::build(self).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
+        Ok(registry.get_or_insert_with(|| value))
     }
 
     /// Return the cached value for `query`, if one is present.
@@ -223,11 +204,19 @@ impl DependencyFactoryHandle {
         Ok(self.upgrade()?.get_for(query))
     }
 
-    /// Resolve the value for `query`, building it via `Q::build` if it is
+    /// Return the value for `query`, building it via `Q::build` if it is
     /// not already cached. Returns [`BuildError::factory_dropped`] if the
     /// owning factory is gone.
-    pub fn build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
-        build_query(&self.upgrade()?, self, query)
+    pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
+        let registry = self.upgrade()?;
+        if let Some(arc) = registry.get_for(&query) {
+            return Ok(arc);
+        }
+        let _guard = CycleGuard::enter(Frame::query(&registry, &query))?;
+        let value = query
+            .build(self)
+            .map_err(|e| e.push_frame(std::any::type_name::<Q::Value>()))?;
+        Ok(registry.get_or_insert_with_for(query, || value))
     }
 }
 
@@ -246,8 +235,8 @@ pub trait Singleton: Send + Sync + Sized + 'static {
 /// A keyed resource the factory can build: the implementor is the key
 /// value, and [`Key::Value`] is the resource produced for it. Multiple
 /// instances per value type may coexist, distinguished by the key value.
-/// Calling `build_for(key)` on the factory caches the produced value in
-/// the registry under that key.
+/// Calling `get_or_build_for(key)` on the factory caches the produced
+/// value in the registry under that key.
 ///
 /// `build` must be cheap and side-effect-free: no I/O, no blocking, no
 /// contended locking. Expensive setup belongs in async lifecycle hooks

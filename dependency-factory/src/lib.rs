@@ -94,15 +94,15 @@ mod tests {
     #[test]
     fn build_for_uses_query_build_when_absent() {
         let factory = DependencyFactory::new();
-        let built = factory.build_for(StringKey(3)).unwrap();
+        let built = factory.get_or_build_for(StringKey(3)).unwrap();
         assert_eq!(*built, "built-3");
     }
 
     #[test]
     fn build_for_caches_results() {
         let factory = DependencyFactory::new();
-        let a = factory.build_for(StringKey(3)).unwrap();
-        let b = factory.build_for(StringKey(3)).unwrap();
+        let a = factory.get_or_build_for(StringKey(3)).unwrap();
+        let b = factory.get_or_build_for(StringKey(3)).unwrap();
         assert!(Arc::ptr_eq(&a, &b));
     }
 
@@ -113,7 +113,7 @@ mod tests {
             .registry()
             .insert_for(StringKey(3), "by hand".into())
             .unwrap();
-        let built = factory.build_for(StringKey(3)).unwrap();
+        let built = factory.get_or_build_for(StringKey(3)).unwrap();
         assert!(Arc::ptr_eq(&inserted, &built));
     }
 
@@ -126,7 +126,7 @@ mod tests {
             .unwrap();
         let handle = factory.handle();
         assert_eq!(*handle.get_for(&StringKey(1)).unwrap().unwrap(), "one");
-        let built = handle.build_for(StringKey(2)).unwrap();
+        let built = handle.get_or_build_for(StringKey(2)).unwrap();
         assert_eq!(*built, "built-2");
     }
 
@@ -136,6 +136,6 @@ mod tests {
         let handle = factory.handle();
         drop(factory);
         assert!(handle.get_for(&StringKey(1)).is_err());
-        assert!(handle.build_for(StringKey(1)).is_err());
+        assert!(handle.get_or_build_for(StringKey(1)).is_err());
     }
 }

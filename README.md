@@ -63,13 +63,13 @@ struct Greeter {
 }
 
 let factory = DependencyFactory::new();
-let greeter: Arc<Greeter> = factory.build().unwrap();
+let greeter: Arc<Greeter> = factory.get_or_build().unwrap();
 assert_eq!(greeter.config.greeting, "hello");
 
 // A value placed in the registry by hand is used instead of building one.
 let factory = DependencyFactory::new();
 factory.registry().insert(Config { greeting: "g'day".into() }).unwrap();
-let greeter: Arc<Greeter> = factory.build().unwrap();
+let greeter: Arc<Greeter> = factory.get_or_build().unwrap();
 assert_eq!(greeter.config.greeting, "g'day");
 ```
 

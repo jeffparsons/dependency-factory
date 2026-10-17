@@ -42,7 +42,7 @@ impl Key for ServiceKey {
 impl Query for ServiceKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<Service, BuildError> {
         Ok(Service {
-            db: factory.build_for(DbKey(self.0))?,
+            db: factory.get_or_build_for(DbKey(self.0))?,
             label: self.0,
         })
     }
@@ -51,8 +51,8 @@ impl Query for ServiceKey {
 #[test]
 fn distinct_keys_produce_distinct_outputs() {
     let factory = DependencyFactory::new();
-    let a = factory.build_for(ServiceKey("a")).unwrap();
-    let b = factory.build_for(ServiceKey("b")).unwrap();
+    let a = factory.get_or_build_for(ServiceKey("a")).unwrap();
+    let b = factory.get_or_build_for(ServiceKey("b")).unwrap();
     assert!(!Arc::ptr_eq(&a, &b));
     assert_eq!(a.label, "a");
     assert_eq!(b.label, "b");
@@ -62,16 +62,16 @@ fn distinct_keys_produce_distinct_outputs() {
 #[test]
 fn shared_dependency_key_produces_shared_arc() {
     let factory = DependencyFactory::new();
-    let svc = factory.build_for(ServiceKey("shared")).unwrap();
-    let db = factory.build_for(DbKey("shared")).unwrap();
+    let svc = factory.get_or_build_for(ServiceKey("shared")).unwrap();
+    let db = factory.get_or_build_for(DbKey("shared")).unwrap();
     assert!(Arc::ptr_eq(&svc.db, &db));
 }
 
 #[test]
 fn build_for_caches_per_key() {
     let factory = DependencyFactory::new();
-    let s1 = factory.build_for(ServiceKey("one")).unwrap();
-    let s2 = factory.build_for(ServiceKey("one")).unwrap();
+    let s1 = factory.get_or_build_for(ServiceKey("one")).unwrap();
+    let s2 = factory.get_or_build_for(ServiceKey("one")).unwrap();
     assert!(Arc::ptr_eq(&s1, &s2));
 }
 
@@ -87,7 +87,7 @@ fn pre_inserted_query_output_short_circuits_build() {
             },
         )
         .unwrap();
-    let service = factory.build_for(ServiceKey("override")).unwrap();
+    let service = factory.get_or_build_for(ServiceKey("override")).unwrap();
     assert!(Arc::ptr_eq(&service.db, &custom));
     assert_eq!(service.db.name, "fake");
 }
@@ -135,7 +135,7 @@ impl Key for DependsOnFailingKey {
 impl Query for DependsOnFailingKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<DependsOnFailing, BuildError> {
         Ok(DependsOnFailing {
-            f: factory.build_for(FailingKey)?,
+            f: factory.get_or_build_for(FailingKey)?,
         })
     }
 }
@@ -143,7 +143,7 @@ impl Query for DependsOnFailingKey {
 #[test]
 fn errors_carry_chain_of_output_type_names() {
     let factory = DependencyFactory::new();
-    let err = factory.build_for(DependsOnFailingKey).unwrap_err();
+    let err = factory.get_or_build_for(DependsOnFailingKey).unwrap_err();
     let chain = err.chain();
     assert_eq!(chain.len(), 2);
     assert!(
@@ -185,7 +185,7 @@ impl Key for TimedDbKey {
 impl Query for TimedDbKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<TimedDb, BuildError> {
         Ok(TimedDb {
-            _clock: factory.build::<Clock>()?,
+            _clock: factory.get_or_build::<Clock>()?,
             name: self.0.into(),
         })
     }
@@ -194,8 +194,8 @@ impl Query for TimedDbKey {
 #[test]
 fn query_can_depend_on_singleton() {
     let factory = DependencyFactory::new();
-    let db = factory.build_for(TimedDbKey("primary")).unwrap();
+    let db = factory.get_or_build_for(TimedDbKey("primary")).unwrap();
     assert_eq!(db.name, "primary");
-    let clock = factory.build::<Clock>().unwrap();
+    let clock = factory.get_or_build::<Clock>().unwrap();
     assert!(Arc::ptr_eq(&db._clock, &clock));
 }

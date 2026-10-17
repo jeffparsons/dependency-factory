@@ -163,7 +163,7 @@ impl<V> fmt::Display for OccupiedError<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the registry already holds a value for {}",
+            "the registry slot for this key is already occupied (value type {})",
             std::any::type_name::<V>()
         )
     }
