@@ -416,8 +416,17 @@ impl Drop for CycleGuard {
 ///
 /// For any one key, `build` runs at most once per cache miss, even when
 /// several threads ask for the key at the same time: the first caller
-/// builds and the others wait for its result. A cycle that spans threads
-/// is reported as a [`CycleError`] rather than deadlocking.
+/// builds and the others wait for its result.
+///
+/// Cycle detection is best-effort. It exists primarily to catch cycles in
+/// a dependency graph resolved all at once, typically on one thread at
+/// startup, and it also reports a cycle whose halves are being built on
+/// different threads when every edge in the cycle is a `build` call. It
+/// cannot see an edge that goes through user synchronisation: a `build`
+/// that blocks on a lock, channel or thread which in turn asks for the
+/// key being built will deadlock, and a sufficiently motivated caller can
+/// always manufacture such a case. Keeping `build` free of blocking is
+/// what rules it out.
 pub struct DependencyFactory {
     inner: Arc<Inner>,
 }
@@ -569,7 +578,9 @@ impl DependencyFactoryHandle {
 ///
 /// The factory calls `build` at most once per cache miss, even under
 /// concurrent requests, and other threads wait on the result while it
-/// runs. A `build` that blocks therefore stalls them too.
+/// runs. A `build` that blocks therefore stalls them too. If what it
+/// blocks on is itself waiting for this key, the factory cannot tell and
+/// both deadlock.
 pub trait Singleton: Send + Sync + Sized + 'static {
     fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError>;
 }
@@ -585,7 +596,9 @@ pub trait Singleton: Send + Sync + Sized + 'static {
 ///
 /// The factory calls `build` at most once per key per cache miss, even
 /// under concurrent requests, and other threads wait on the result while
-/// it runs. A `build` that blocks therefore stalls them too.
+/// it runs. A `build` that blocks therefore stalls them too. If what it
+/// blocks on is itself waiting for this key, the factory cannot tell and
+/// both deadlock.
 pub trait Query: Hash + Eq + Clone + Send + Sync + 'static {
     type Output: Send + Sync + 'static;
 

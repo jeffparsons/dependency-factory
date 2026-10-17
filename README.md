@@ -12,12 +12,17 @@ Two kinds of resources are supported:
   Implement `Query` to define the key type and how the resource is built
   from it.
 
-Cycles in the dependency graph are detected at runtime and surfaced as
-structured errors with the full path through the cycle, including cycles
-whose halves are being built on different threads.
-
 A resource is built at most once per key. If several threads ask for the
 same key at once, one builds it and the others wait for the result.
+
+Cycles in the dependency graph are detected at runtime and surfaced as
+structured errors with the full path through the cycle. Detection is
+best-effort: it is reliable for a graph resolved on one thread, which is
+the normal shape at startup, and it also catches cycles whose halves are
+being built on different threads, as long as every edge is a `build`
+call. A `build` that blocks on a lock, channel or thread which in turn
+needs the key being built is a cycle the factory cannot see, and it will
+deadlock. A sufficiently motivated caller can always manufacture one.
 
 ## Usage
 
