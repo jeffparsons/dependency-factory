@@ -61,9 +61,12 @@ fn build_caches_each_resource() {
 #[test]
 fn pre_inserted_resource_short_circuits_build() {
     let factory = DependencyFactory::new();
-    let custom = factory.insert(Config {
-        greeting: "g'day".into(),
-    });
+    let custom = factory
+        .registry()
+        .insert(Config {
+            greeting: "g'day".into(),
+        })
+        .unwrap();
     let greeter = factory.build::<Greeter>().unwrap();
     assert!(Arc::ptr_eq(&greeter.config, &custom));
     assert_eq!(greeter.config.greeting, "g'day");

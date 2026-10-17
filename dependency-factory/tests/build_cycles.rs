@@ -2,7 +2,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use dependency_factory::{
-    BuildError, CycleError, DependencyFactory, DependencyFactoryHandle, Query, Singleton,
+    BuildError, CycleError, DependencyFactory, DependencyFactoryHandle, Key, Query, Singleton,
 };
 
 fn cycle_of(err: &BuildError) -> &CycleError {
@@ -85,9 +85,11 @@ struct Tree;
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
 struct TreeKey(u32);
 
-impl Query for TreeKey {
-    type Output = Tree;
+impl Key for TreeKey {
+    type Value = Tree;
+}
 
+impl Query for TreeKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<Tree, BuildError> {
         match self.0 {
             1 => {
@@ -114,9 +116,11 @@ fn query_cycle_on_different_keys_is_detected() {
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
 struct SelfishKey;
 
-impl Query for SelfishKey {
-    type Output = ();
+impl Key for SelfishKey {
+    type Value = ();
+}
 
+impl Query for SelfishKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<(), BuildError> {
         factory.build_for(SelfishKey)?;
         Ok(())
@@ -138,9 +142,11 @@ struct Linear;
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
 struct LinearKey(u32);
 
-impl Query for LinearKey {
-    type Output = Linear;
+impl Key for LinearKey {
+    type Value = Linear;
+}
 
+impl Query for LinearKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<Linear, BuildError> {
         if self.0 < 3 {
             factory.build_for(LinearKey(self.0 + 1))?;
@@ -175,9 +181,11 @@ struct SpokeKey(&'static str);
 #[derive(Debug)]
 struct Spoke;
 
-impl Query for SpokeKey {
-    type Output = Spoke;
+impl Key for SpokeKey {
+    type Value = Spoke;
+}
 
+impl Query for SpokeKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<Spoke, BuildError> {
         factory.build::<Hub>()?;
         Ok(Spoke)
@@ -224,7 +232,7 @@ impl Singleton for Bridged {
 fn frames_in_distinct_factories_do_not_collide() {
     let factory_a = DependencyFactory::new();
     let factory_b = DependencyFactory::new();
-    factory_a.insert(factory_b.handle());
+    factory_a.registry().insert(factory_b.handle()).unwrap();
 
     let bridged = factory_a
         .build::<Bridged>()

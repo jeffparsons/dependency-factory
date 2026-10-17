@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dependency_factory::{
-    BuildError, DependencyFactory, DependencyFactoryHandle, Query, Singleton,
+    BuildError, DependencyFactory, DependencyFactoryHandle, Key, Query, Singleton,
 };
 
 struct Config {
@@ -91,9 +91,11 @@ fn derive_propagates_error_with_frame() {
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct DbKey(&'static str);
 
-impl Query for DbKey {
-    type Output = String;
+impl Key for DbKey {
+    type Value = String;
+}
 
+impl Query for DbKey {
     fn build(&self, _factory: &DependencyFactoryHandle) -> Result<String, BuildError> {
         Ok(format!("db-{}", self.0))
     }

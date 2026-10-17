@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dependency_factory::{
-    BuildError, DependencyFactory, DependencyFactoryHandle, Query, Singleton,
+    BuildError, DependencyFactory, DependencyFactoryHandle, Key, Query, Singleton,
 };
 
 #[derive(Debug)]
@@ -13,9 +13,11 @@ struct Db {
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct DbKey(&'static str);
 
-impl Query for DbKey {
-    type Output = Db;
+impl Key for DbKey {
+    type Value = Db;
+}
 
+impl Query for DbKey {
     fn build(&self, _factory: &DependencyFactoryHandle) -> Result<Db, BuildError> {
         Ok(Db {
             name: self.0.into(),
@@ -33,9 +35,11 @@ struct Service {
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct ServiceKey(&'static str);
 
-impl Query for ServiceKey {
-    type Output = Service;
+impl Key for ServiceKey {
+    type Value = Service;
+}
 
+impl Query for ServiceKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<Service, BuildError> {
         Ok(Service {
             db: factory.build_for(DbKey(self.0))?,
@@ -74,12 +78,15 @@ fn build_for_caches_per_key() {
 #[test]
 fn pre_inserted_query_output_short_circuits_build() {
     let factory = DependencyFactory::new();
-    let custom = factory.insert_for(
-        DbKey("override"),
-        Db {
-            name: "fake".into(),
-        },
-    );
+    let custom = factory
+        .registry()
+        .insert_for(
+            DbKey("override"),
+            Db {
+                name: "fake".into(),
+            },
+        )
+        .unwrap();
     let service = factory.build_for(ServiceKey("override")).unwrap();
     assert!(Arc::ptr_eq(&service.db, &custom));
     assert_eq!(service.db.name, "fake");
@@ -102,9 +109,11 @@ struct Failing;
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct FailingKey;
 
-impl Query for FailingKey {
-    type Output = Failing;
+impl Key for FailingKey {
+    type Value = Failing;
+}
 
+impl Query for FailingKey {
     fn build(&self, _factory: &DependencyFactoryHandle) -> Result<Failing, BuildError> {
         Err(Upstream.into())
     }
@@ -119,9 +128,11 @@ struct DependsOnFailing {
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct DependsOnFailingKey;
 
-impl Query for DependsOnFailingKey {
-    type Output = DependsOnFailing;
+impl Key for DependsOnFailingKey {
+    type Value = DependsOnFailing;
+}
 
+impl Query for DependsOnFailingKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<DependsOnFailing, BuildError> {
         Ok(DependsOnFailing {
             f: factory.build_for(FailingKey)?,
@@ -167,9 +178,11 @@ struct TimedDb {
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct TimedDbKey(&'static str);
 
-impl Query for TimedDbKey {
-    type Output = TimedDb;
+impl Key for TimedDbKey {
+    type Value = TimedDb;
+}
 
+impl Query for TimedDbKey {
     fn build(&self, factory: &DependencyFactoryHandle) -> Result<TimedDb, BuildError> {
         Ok(TimedDb {
             _clock: factory.build::<Clock>()?,
