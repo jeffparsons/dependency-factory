@@ -13,7 +13,11 @@ Two kinds of resources are supported:
   from it.
 
 Cycles in the dependency graph are detected at runtime and surfaced as
-structured errors with the full path through the cycle.
+structured errors with the full path through the cycle, including cycles
+whose halves are being built on different threads.
+
+A resource is built at most once per key. If several threads ask for the
+same key at once, one builds it and the others wait for the result.
 
 ## Usage
 

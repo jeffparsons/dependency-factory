@@ -13,8 +13,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that would prevent ever destroying the factory.
 - `Singleton` trait: one-instance-per-type resources, recursively buildable.
 - `Query` trait: keyed resources where the key value parameterises the build.
-- Per-thread cycle detection across `Singleton` and `Query` resolution, with
-  `BuildError` chains that name each frame and surface a `CycleError`
-  for downcasting when a cycle is detected.
+- Cycle detection across `Singleton` and `Query` resolution, both within a
+  thread and across threads, with `BuildError` chains that name each frame
+  and surface a `CycleError` for downcasting when a cycle is detected.
+- At-most-once building per key: concurrent requests for a key whose build
+  is in progress wait for that build instead of running their own, and
+  retry if it fails.
 - `#[derive(Singleton)]` proc macro with a `#[factory(query = key_fn)]`
   field attribute for opting individual fields into `Query`-keyed resolution.

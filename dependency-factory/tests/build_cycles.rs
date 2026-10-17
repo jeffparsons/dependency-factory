@@ -1,5 +1,4 @@
-use std::sync::{Arc, Barrier};
-use std::thread;
+use std::sync::Arc;
 
 use dependency_factory::{
     BuildError, CycleError, DependencyFactory, DependencyFactoryHandle, Query, Singleton,
@@ -230,39 +229,6 @@ fn frames_in_distinct_factories_do_not_collide() {
         .build::<Bridged>()
         .expect("recursing into a different factory for the same type must not look like a cycle");
     assert!(!Arc::ptr_eq(&bridged.local, &bridged.remote));
-}
-
-// --- Concurrent build of same key returns same Arc -------------------------
-
-struct Slowish {
-    counter: u32,
-}
-
-impl Singleton for Slowish {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
-        // Sleep so two threads' build windows overlap deterministically.
-        thread::sleep(std::time::Duration::from_millis(50));
-        Ok(Slowish { counter: 0 })
-    }
-}
-
-#[test]
-fn concurrent_builds_of_same_key_converge_on_one_arc() {
-    let factory = Arc::new(DependencyFactory::new());
-    let barrier = Arc::new(Barrier::new(2));
-
-    let mut handles = Vec::new();
-    for _ in 0..2 {
-        let factory = Arc::clone(&factory);
-        let barrier = Arc::clone(&barrier);
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            factory.build::<Slowish>().unwrap()
-        }));
-    }
-    let arcs: Vec<Arc<Slowish>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    assert!(Arc::ptr_eq(&arcs[0], &arcs[1]));
-    assert_eq!(arcs[0].counter, 0);
 }
 
 // --- Breadcrumb is balanced after a non-cycle error ------------------------

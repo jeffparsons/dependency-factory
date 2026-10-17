@@ -121,6 +121,7 @@ name = "dependency-factory"
 version = "0.1.0"
 dependencies = [
  "dependency-factory-derive",
+ "once_cell",
 ]
 
 [[package]]
