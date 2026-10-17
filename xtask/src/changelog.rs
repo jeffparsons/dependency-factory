@@ -2,7 +2,7 @@
 //!
 //! The format is [Keep a Changelog](https://keepachangelog.com), which we treat
 //! as a small fixed grammar: section headings are exactly `## [<TAG>]` (the
-//! [Unreleased] section) or `## [<VERSION>] - <DATE>` (a released section). The
+//! `[Unreleased]` section) or `## [<VERSION>] - <DATE>` (a released section). The
 //! body of a section is everything between two consecutive section headings.
 
 use anyhow::{Context, Result, anyhow, bail};

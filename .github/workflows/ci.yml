@@ -4,9 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,18 +20,19 @@ jobs:
     name: Build & test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets --locked
       - run: cargo test --workspace --locked
       - run: cargo build -p dependency-factory --no-default-features --locked
+      - run: cargo doc --workspace --no-deps --locked
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -39,7 +43,7 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
