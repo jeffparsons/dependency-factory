@@ -70,10 +70,8 @@ These should already be in place before the first release.
 
 - Both crates exist on crates.io. Trusted publishing can only be
   configured for a crate that already exists, so both crates were first
-  published by hand at `0.0.1`, from a scratch worktree with the
-  workspace version and the lib's derive pin edited to `0.0.1`
-  (`cargo publish --workspace --allow-dirty`). That release has no
-  changelog entry.
+  published by hand at `0.0.1` with `cargo publish --workspace` from
+  `main`. That release has no changelog entry or tag.
 - Each crate has a trusted publisher on crates.io (crate page →
   `Settings → Trusted Publishing`) for repository
   `jeffparsons/dependency-factory`, workflow `release.yml` and
