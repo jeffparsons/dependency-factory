@@ -1,5 +1,10 @@
 # dependency-factory
 
+[![Crate](https://img.shields.io/crates/v/dependency-factory.svg)](https://crates.io/crates/dependency-factory)
+[![Docs](https://docs.rs/dependency-factory/badge.svg)](https://docs.rs/dependency-factory)
+[![Build status](https://github.com/jeffparsons/dependency-factory/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jeffparsons/dependency-factory/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.91%2B-blue.svg)](https://github.com/jeffparsons/dependency-factory)
+
 A type-safe dependency-injection container for Rust. Resources are
 auto-built on first request, cached as `Arc<T>`, and resolved recursively
 from their declared dependencies.
