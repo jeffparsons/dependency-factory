@@ -3,7 +3,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
+use std::thread::{self, ThreadId};
 
 use crate::error::{BuildError, CycleError};
 
@@ -37,21 +38,136 @@ impl<R: ?Sized> Hash for SingletonKey<R> {
     fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
 }
 
-type KeyMap<Q, V> = HashMap<Q, Arc<V>>;
+/// One cache slot. A key with no slot has never been requested, or its
+/// last build failed.
+enum Slot<V> {
+    /// `build` is running for this key on the named thread. Other threads
+    /// that ask for the key wait for the transition out of this state.
+    Building {
+        owner: ThreadId,
+    },
+    Ready(Arc<V>),
+}
 
-struct Inner {
+type KeyMap<Q, V> = HashMap<Q, Slot<V>>;
+
+/// Why a parked thread is parked: the thread whose build it waits for,
+/// and the name of the resource it wanted, for cycle reports.
+struct Waiting {
+    on: ThreadId,
+    wants: &'static str,
+}
+
+struct State {
     /// Outer key: `TypeId` of the query key type `Q`.
-    /// Stored value: a boxed `KeyMap<Q, V>` — a `HashMap<Q, Arc<V>>` —
+    /// Stored value: a boxed `KeyMap<Q, V>` — a `HashMap<Q, Slot<V>>` —
     /// type-erased so that maps for different query types can live in one
     /// outer map. The inner map is recovered by downcasting on lookup.
-    by_query_type: Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+    by_query_type: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    /// Threads currently parked on `Inner::slot_changed`, keyed by the
+    /// parked thread. Used to detect cycles that span threads before
+    /// parking would turn them into a deadlock.
+    waiting: HashMap<ThreadId, Waiting>,
+}
+
+impl State {
+    fn map_mut<Q, V>(&mut self) -> &mut KeyMap<Q, V>
+    where
+        Q: Hash + Eq + Clone + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        self.by_query_type
+            .entry(TypeId::of::<Q>())
+            .or_insert_with(|| Box::new(KeyMap::<Q, V>::new()))
+            .downcast_mut::<KeyMap<Q, V>>()
+            .expect("stored map had a different value type than expected for this query type")
+    }
+
+    fn map<Q, V>(&self) -> Option<&KeyMap<Q, V>>
+    where
+        Q: Hash + Eq + Clone + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        let entry = self.by_query_type.get(&TypeId::of::<Q>())?;
+        Some(
+            entry
+                .downcast_ref::<KeyMap<Q, V>>()
+                .expect("stored map had a different value type than expected for this query type"),
+        )
+    }
+
+    /// If parking the current thread to wait for `owner` would close a
+    /// cycle of threads each waiting on the next, return the names of the
+    /// resources along that cycle. `wants` is what the current thread is
+    /// asking for.
+    fn wait_cycle(
+        &self,
+        owner: ThreadId,
+        me: ThreadId,
+        wants: &'static str,
+    ) -> Option<Vec<&'static str>> {
+        let mut path = vec![wants];
+        let mut next = owner;
+        // Each step consumes a distinct parked thread, so the chain is no
+        // longer than the number of parked threads plus the first hop.
+        for _ in 0..=self.waiting.len() {
+            if next == me {
+                path.push(wants);
+                return Some(path);
+            }
+            let waiting = self.waiting.get(&next)?;
+            path.push(waiting.wants);
+            next = waiting.on;
+        }
+        None
+    }
+}
+
+struct Inner {
+    state: Mutex<State>,
+    /// Notified on every slot transition. Parked threads re-examine their
+    /// slot when woken; spurious wake-ups are harmless.
+    slot_changed: Condvar,
+}
+
+/// What `Inner::claim` found for a key once it stopped waiting.
+enum Claim<Q, V>
+where
+    Q: Hash + Eq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    /// Another thread finished the build (or an `insert` landed) while we
+    /// were looking. Nothing to do but return the value.
+    Ready(Arc<V>),
+    /// The slot was empty and is now ours to build.
+    Claimed(ClaimGuard<Q, V>),
+}
+
+/// A snapshot of one slot taken under the lock. Lets `claim` release the
+/// borrow of the map before it waits or inserts.
+enum Found<V> {
+    Ready(Arc<V>),
+    Building(ThreadId),
+    Empty,
 }
 
 impl Inner {
     fn new() -> Self {
         Self {
-            by_query_type: Mutex::new(HashMap::new()),
+            state: Mutex::new(State {
+                by_query_type: HashMap::new(),
+                waiting: HashMap::new(),
+            }),
+            slot_changed: Condvar::new(),
         }
+    }
+
+    /// The internal lock is never held across user code, so poisoning can
+    /// only come from a bug in the factory itself. The state is still
+    /// structurally valid in that case, so recover rather than cascade
+    /// panics into every other thread.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn insert_keyed<Q, V>(&self, key: Q, value: V) -> Arc<V>
@@ -60,48 +176,207 @@ impl Inner {
         V: Send + Sync + 'static,
     {
         let arc = Arc::new(value);
-        let mut by_qtype = self.by_query_type.lock().unwrap();
-        let entry = by_qtype
-            .entry(TypeId::of::<Q>())
-            .or_insert_with(|| Box::new(KeyMap::<Q, V>::new()));
-        let map = entry
-            .downcast_mut::<KeyMap<Q, V>>()
-            .expect("stored map had a different value type than expected for this query type");
-        map.insert(key, arc.clone());
+        {
+            let mut state = self.lock();
+            state
+                .map_mut::<Q, V>()
+                .insert(key, Slot::Ready(arc.clone()));
+        }
+        // A build for this key may be in progress elsewhere with threads
+        // parked behind it. They can have the inserted value now.
+        self.slot_changed.notify_all();
         arc
     }
 
+    /// The cached value for `key`, if a finished one is present. A key
+    /// whose build is in progress on another thread reads as absent.
     fn get_keyed<Q, V>(&self, key: &Q) -> Option<Arc<V>>
     where
         Q: Hash + Eq + Clone + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let by_qtype = self.by_query_type.lock().unwrap();
-        let entry = by_qtype.get(&TypeId::of::<Q>())?;
-        let map = entry
-            .downcast_ref::<KeyMap<Q, V>>()
-            .expect("stored map had a different value type than expected for this query type");
-        map.get(key).cloned()
+        let state = self.lock();
+        match state.map::<Q, V>()?.get(key)? {
+            Slot::Ready(arc) => Some(arc.clone()),
+            Slot::Building { .. } => None,
+        }
     }
 
-    /// Insert `value` under `key` only if the slot is currently empty,
-    /// returning whichever `Arc` ends up cached. Used by the build path
-    /// so concurrent builders of the same key converge on a single
-    /// shared `Arc`.
-    fn insert_if_absent<Q, V>(&self, key: Q, value: V) -> Arc<V>
+    /// Resolve `key`, calling `build` at most once per cache miss across
+    /// all threads: claim the slot under the lock, run `build` with the
+    /// lock released, then commit the value under the lock again. Threads
+    /// that ask for the key in between wait for the commit.
+    fn build_keyed<Q, V>(
+        self: &Arc<Self>,
+        key: Q,
+        frame: Frame,
+        build: impl FnOnce() -> Result<V, BuildError>,
+    ) -> Result<Arc<V>, BuildError>
     where
         Q: Hash + Eq + Clone + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let arc = Arc::new(value);
-        let mut by_qtype = self.by_query_type.lock().unwrap();
-        let entry = by_qtype
-            .entry(TypeId::of::<Q>())
-            .or_insert_with(|| Box::new(KeyMap::<Q, V>::new()));
-        let map = entry
-            .downcast_mut::<KeyMap<Q, V>>()
-            .expect("stored map had a different value type than expected for this query type");
-        map.entry(key).or_insert(arc).clone()
+        if let Some(arc) = self.get_keyed::<Q, V>(&key) {
+            return Ok(arc);
+        }
+        // Same-thread cycles are caught here, before any claim, with the
+        // full path from the breadcrumb.
+        let _breadcrumb = CycleGuard::enter(frame)?;
+        let guard = match self.claim::<Q, V>(&key, frame.type_name)? {
+            Claim::Ready(arc) => return Ok(arc),
+            Claim::Claimed(guard) => guard,
+        };
+        // No lock is held while user code runs. If `build` fails or
+        // unwinds, dropping `guard` releases the slot and wakes waiters.
+        let value = build().map_err(|e| e.push_frame(frame.type_name))?;
+        Ok(guard.commit(value))
+    }
+
+    /// Take ownership of the slot for `key`, waiting while another thread
+    /// is building it. Returns the finished value instead if one appears
+    /// while waiting, and a `CycleError` if waiting would deadlock a ring
+    /// of threads.
+    fn claim<Q, V>(
+        self: &Arc<Self>,
+        key: &Q,
+        type_name: &'static str,
+    ) -> Result<Claim<Q, V>, BuildError>
+    where
+        Q: Hash + Eq + Clone + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        let me = thread::current().id();
+        let mut state = self.lock();
+        loop {
+            let found = match state.map::<Q, V>().and_then(|map| map.get(key)) {
+                Some(Slot::Ready(arc)) => Found::Ready(arc.clone()),
+                Some(Slot::Building { owner }) => Found::Building(*owner),
+                None => Found::Empty,
+            };
+            match found {
+                Found::Ready(arc) => return Ok(Claim::Ready(arc)),
+                Found::Building(owner) => {
+                    if let Some(path) = state.wait_cycle(owner, me, type_name) {
+                        return Err(CycleError::new(path).into());
+                    }
+                    state.waiting.insert(
+                        me,
+                        Waiting {
+                            on: owner,
+                            wants: type_name,
+                        },
+                    );
+                    state = self
+                        .slot_changed
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    state.waiting.remove(&me);
+                }
+                Found::Empty => {
+                    state
+                        .map_mut::<Q, V>()
+                        .insert(key.clone(), Slot::Building { owner: me });
+                    return Ok(Claim::Claimed(ClaimGuard {
+                        inner: Arc::clone(self),
+                        key: key.clone(),
+                        owner: me,
+                        _value: PhantomData,
+                    }));
+                }
+            }
+        }
+    }
+
+    fn build_singleton<R: Singleton>(
+        self: &Arc<Self>,
+        handle: &DependencyFactoryHandle,
+    ) -> Result<Arc<R>, BuildError> {
+        self.build_keyed(
+            SingletonKey::<R>::new(),
+            Frame::singleton::<R>(self),
+            || R::build(handle),
+        )
+    }
+
+    fn build_query<Q: Query>(
+        self: &Arc<Self>,
+        query: Q,
+        handle: &DependencyFactoryHandle,
+    ) -> Result<Arc<Q::Output>, BuildError> {
+        let frame = Frame::query::<Q>(self, &query);
+        self.build_keyed(query.clone(), frame, || query.build(handle))
+    }
+}
+
+/// Ownership of one in-progress slot. Dropping it without `commit`
+/// (error or unwind inside `build`) empties the slot and wakes waiters so
+/// one of them can try again.
+struct ClaimGuard<Q, V>
+where
+    Q: Hash + Eq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    inner: Arc<Inner>,
+    key: Q,
+    owner: ThreadId,
+    _value: PhantomData<fn() -> V>,
+}
+
+impl<Q, V> ClaimGuard<Q, V>
+where
+    Q: Hash + Eq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    /// True if the slot is still the in-progress marker this guard placed.
+    /// False if an `insert` replaced it with a finished value meanwhile.
+    fn still_mine(&self, map: &KeyMap<Q, V>) -> bool {
+        matches!(map.get(&self.key), Some(Slot::Building { owner }) if *owner == self.owner)
+    }
+
+    /// Store the built value and wake waiters. If an `insert` for the same
+    /// key landed during the build, the inserted value stays and is
+    /// returned instead; the built value is dropped.
+    fn commit(self, value: V) -> Arc<V> {
+        let built = Arc::new(value);
+        let result = {
+            let mut state = self.inner.lock();
+            let map = state.map_mut::<Q, V>();
+            if self.still_mine(map) {
+                map.insert(self.key.clone(), Slot::Ready(built.clone()));
+                built
+            } else {
+                match map.get(&self.key) {
+                    Some(Slot::Ready(inserted)) => inserted.clone(),
+                    // Only this guard removes its own marker, so the slot
+                    // cannot be empty or owned by someone else here.
+                    _ => unreachable!("in-progress slot vanished while its builder held the claim"),
+                }
+            }
+        };
+        self.inner.slot_changed.notify_all();
+        result
+    }
+}
+
+impl<Q, V> Drop for ClaimGuard<Q, V>
+where
+    Q: Hash + Eq + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        let released = {
+            let mut state = self.inner.lock();
+            let map = state.map_mut::<Q, V>();
+            if self.still_mine(map) {
+                map.remove(&self.key);
+                true
+            } else {
+                false
+            }
+        };
+        if released {
+            self.inner.slot_changed.notify_all();
+        }
     }
 }
 
@@ -182,6 +457,11 @@ impl Drop for CycleGuard {
 /// factory down. Most code should pass [`DependencyFactoryHandle`] around
 /// instead, and reach for `DependencyFactory` only at the application's
 /// top level where ownership lives.
+///
+/// For any one key, `build` runs at most once per cache miss, even when
+/// several threads ask for the key at the same time: the first caller
+/// builds and the others wait for its result. A cycle that spans threads
+/// is reported as a [`CycleError`] rather than deadlocking.
 pub struct DependencyFactory {
     inner: Arc<Inner>,
 }
@@ -203,12 +483,15 @@ impl DependencyFactory {
     }
 
     /// Pre-populate the singleton slot for type `R`. Overwrites any
-    /// existing entry for `R`. Returns the cached `Arc<R>`.
+    /// existing entry for `R`, and takes precedence over a build of `R`
+    /// that is in progress on another thread. Returns the cached `Arc<R>`.
     pub fn insert<R: Send + Sync + 'static>(&self, value: R) -> Arc<R> {
         self.inner.insert_keyed(SingletonKey::<R>::new(), value)
     }
 
     /// Return the cached singleton instance of `R`, if one is present.
+    /// Never waits: while `R` is being built on another thread this
+    /// returns `None`.
     pub fn get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
         self.inner
             .get_keyed::<SingletonKey<R>, R>(&SingletonKey::<R>::new())
@@ -216,39 +499,32 @@ impl DependencyFactory {
 
     /// Resolve the singleton instance of `R`, building it if it is not
     /// already cached. Recursive `build` calls inside `R::build` see the
-    /// same factory through a [`DependencyFactoryHandle`].
+    /// same factory through a [`DependencyFactoryHandle`]. If another
+    /// thread is already building `R`, waits for and returns its result.
     pub fn build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
-        if let Some(arc) = self.get::<R>() {
-            return Ok(arc);
-        }
-        let _guard = CycleGuard::enter(Frame::singleton::<R>(&self.inner))?;
-        let value =
-            R::build(&self.handle()).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
-        Ok(self.inner.insert_if_absent(SingletonKey::<R>::new(), value))
+        self.inner.build_singleton::<R>(&self.handle())
     }
 
     /// Pre-populate the cached output for `query`. Overwrites any existing
-    /// entry for the same key. Returns the cached `Arc<Q::Output>`.
+    /// entry for the same key, and takes precedence over a build for the
+    /// key that is in progress on another thread. Returns the cached
+    /// `Arc<Q::Output>`.
     pub fn insert_for<Q: Query>(&self, query: Q, value: Q::Output) -> Arc<Q::Output> {
         self.inner.insert_keyed(query, value)
     }
 
-    /// Return the cached output for `query`, if one is present.
+    /// Return the cached output for `query`, if one is present. Never
+    /// waits: while the key is being built on another thread this returns
+    /// `None`.
     pub fn get_for<Q: Query>(&self, query: Q) -> Option<Arc<Q::Output>> {
         self.inner.get_keyed::<Q, Q::Output>(&query)
     }
 
     /// Resolve the output for `query`, building it via `Q::build` if it is
-    /// not already cached.
+    /// not already cached. If another thread is already building this
+    /// key, waits for and returns its result.
     pub fn build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Output>, BuildError> {
-        if let Some(arc) = self.get_for(query.clone()) {
-            return Ok(arc);
-        }
-        let _guard = CycleGuard::enter(Frame::query::<Q>(&self.inner, &query))?;
-        let value = query
-            .build(&self.handle())
-            .map_err(|e| e.push_frame(std::any::type_name::<Q::Output>()))?;
-        Ok(self.inner.insert_if_absent(query, value))
+        self.inner.build_query(query, &self.handle())
     }
 }
 
@@ -294,13 +570,7 @@ impl DependencyFactoryHandle {
     /// owning factory is gone.
     pub fn build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
         let inner = self.upgrade()?;
-        let key = SingletonKey::<R>::new();
-        if let Some(arc) = inner.get_keyed::<SingletonKey<R>, R>(&key) {
-            return Ok(arc);
-        }
-        let _guard = CycleGuard::enter(Frame::singleton::<R>(&inner))?;
-        let value = R::build(self).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
-        Ok(inner.insert_if_absent(key, value))
+        inner.build_singleton::<R>(self)
     }
 
     /// Pre-populate the cached output for `query`. Overwrites any existing
@@ -328,14 +598,7 @@ impl DependencyFactoryHandle {
     /// owning factory is gone.
     pub fn build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Output>, BuildError> {
         let inner = self.upgrade()?;
-        if let Some(arc) = inner.get_keyed::<Q, Q::Output>(&query) {
-            return Ok(arc);
-        }
-        let _guard = CycleGuard::enter(Frame::query::<Q>(&inner, &query))?;
-        let value = query
-            .build(self)
-            .map_err(|e| e.push_frame(std::any::type_name::<Q::Output>()))?;
-        Ok(inner.insert_if_absent(query, value))
+        inner.build_query(query, self)
     }
 }
 
@@ -347,6 +610,10 @@ impl DependencyFactoryHandle {
 /// `build` must be cheap and side-effect-free: no I/O, no blocking, no
 /// contended locking. Expensive setup belongs in async lifecycle hooks
 /// (added later) or in the resource's own methods, not here.
+///
+/// The factory calls `build` at most once per cache miss, even under
+/// concurrent requests, and other threads wait on the result while it
+/// runs. A `build` that blocks therefore stalls them too.
 pub trait Singleton: Send + Sync + Sized + 'static {
     fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError>;
 }
@@ -359,6 +626,10 @@ pub trait Singleton: Send + Sync + Sized + 'static {
 /// `build` must be cheap and side-effect-free: no I/O, no blocking, no
 /// contended locking. Expensive setup belongs in async lifecycle hooks
 /// (added later) or in the resource's own methods, not here.
+///
+/// The factory calls `build` at most once per key per cache miss, even
+/// under concurrent requests, and other threads wait on the result while
+/// it runs. A `build` that blocks therefore stalls them too.
 pub trait Query: Hash + Eq + Clone + Send + Sync + 'static {
     type Output: Send + Sync + 'static;
 
