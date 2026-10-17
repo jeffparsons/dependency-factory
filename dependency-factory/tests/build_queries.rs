@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use dependency_factory::{
-    BuildError, DependencyFactory, DependencyFactoryHandle, Query, Singleton,
-};
+use dependency_factory::{BuildError, DependencyFactory, Query, Singleton};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -16,7 +14,7 @@ struct DbKey(&'static str);
 impl Query for DbKey {
     type Output = Db;
 
-    fn build(&self, _factory: &DependencyFactoryHandle) -> Result<Db, BuildError> {
+    fn build(&self, _factory: &mut DependencyFactory) -> Result<Db, BuildError> {
         Ok(Db {
             name: self.0.into(),
         })
@@ -36,7 +34,7 @@ struct ServiceKey(&'static str);
 impl Query for ServiceKey {
     type Output = Service;
 
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Service, BuildError> {
+    fn build(&self, factory: &mut DependencyFactory) -> Result<Service, BuildError> {
         Ok(Service {
             db: factory.build_for(DbKey(self.0))?,
             label: self.0,
@@ -46,7 +44,7 @@ impl Query for ServiceKey {
 
 #[test]
 fn distinct_keys_produce_distinct_outputs() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let a = factory.build_for(ServiceKey("a")).unwrap();
     let b = factory.build_for(ServiceKey("b")).unwrap();
     assert!(!Arc::ptr_eq(&a, &b));
@@ -57,7 +55,7 @@ fn distinct_keys_produce_distinct_outputs() {
 
 #[test]
 fn shared_dependency_key_produces_shared_arc() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let svc = factory.build_for(ServiceKey("shared")).unwrap();
     let db = factory.build_for(DbKey("shared")).unwrap();
     assert!(Arc::ptr_eq(&svc.db, &db));
@@ -65,7 +63,7 @@ fn shared_dependency_key_produces_shared_arc() {
 
 #[test]
 fn build_for_caches_per_key() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let s1 = factory.build_for(ServiceKey("one")).unwrap();
     let s2 = factory.build_for(ServiceKey("one")).unwrap();
     assert!(Arc::ptr_eq(&s1, &s2));
@@ -73,7 +71,7 @@ fn build_for_caches_per_key() {
 
 #[test]
 fn pre_inserted_query_output_short_circuits_build() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let custom = factory.insert_for(
         DbKey("override"),
         Db {
@@ -105,7 +103,7 @@ struct FailingKey;
 impl Query for FailingKey {
     type Output = Failing;
 
-    fn build(&self, _factory: &DependencyFactoryHandle) -> Result<Failing, BuildError> {
+    fn build(&self, _factory: &mut DependencyFactory) -> Result<Failing, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -122,7 +120,7 @@ struct DependsOnFailingKey;
 impl Query for DependsOnFailingKey {
     type Output = DependsOnFailing;
 
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<DependsOnFailing, BuildError> {
+    fn build(&self, factory: &mut DependencyFactory) -> Result<DependsOnFailing, BuildError> {
         Ok(DependsOnFailing {
             f: factory.build_for(FailingKey)?,
         })
@@ -131,7 +129,7 @@ impl Query for DependsOnFailingKey {
 
 #[test]
 fn errors_carry_chain_of_output_type_names() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let err = factory.build_for(DependsOnFailingKey).unwrap_err();
     let chain = err.chain();
     assert_eq!(chain.len(), 2);
@@ -154,7 +152,7 @@ fn errors_carry_chain_of_output_type_names() {
 struct Clock;
 
 impl Singleton for Clock {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         Ok(Clock)
     }
 }
@@ -170,7 +168,7 @@ struct TimedDbKey(&'static str);
 impl Query for TimedDbKey {
     type Output = TimedDb;
 
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<TimedDb, BuildError> {
+    fn build(&self, factory: &mut DependencyFactory) -> Result<TimedDb, BuildError> {
         Ok(TimedDb {
             _clock: factory.build::<Clock>()?,
             name: self.0.into(),
@@ -180,7 +178,7 @@ impl Query for TimedDbKey {
 
 #[test]
 fn query_can_depend_on_singleton() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let db = factory.build_for(TimedDbKey("primary")).unwrap();
     assert_eq!(db.name, "primary");
     let clock = factory.build::<Clock>().unwrap();

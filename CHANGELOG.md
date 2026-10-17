@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Assembly is now a `&mut` phase followed by a `freeze`. `insert`, `build`
+  and their `_for` variants take `&mut DependencyFactory`, and `Singleton::
+  build` and `Query::build` (including `#[factory(query = ...)]` key
+  functions) receive `&mut DependencyFactory` instead of a handle. Each
+  key is therefore built at most once, with no internal locking. The new
+  `DependencyFactory::freeze` returns a `FrozenFactory`: `Send + Sync`,
+  read-only (`get`/`get_for`), and the owner that handles resolve against.
+- `DependencyFactoryHandle` is read-only. It can be taken during assembly
+  and stored in a resource, but resolves only once the factory is frozen;
+  before that its lookups return `BuildError::factory_not_frozen`.
+
 ### Added
 - `DependencyFactory` and `DependencyFactoryHandle`: type-keyed
   dependency-injection container with `Arc`-shared resources, lazy

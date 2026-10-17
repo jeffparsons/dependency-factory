@@ -20,6 +20,13 @@ Two kinds of resources are supported:
 Cycles in the dependency graph are detected at runtime and surfaced as
 structured errors with the full path through the cycle.
 
+A factory has two phases. While assembling, every `build` and `insert`
+takes `&mut DependencyFactory`, so each resource is built at most once and
+there is no locking. `freeze` then turns the factory into a `FrozenFactory`
+that is `Send + Sync` and read-only. Resources that need to look things up
+later keep a `DependencyFactoryHandle`, a cheap, weak handle that starts
+resolving once the factory is frozen.
+
 ## Usage
 
 ```toml
@@ -35,16 +42,14 @@ The `derive` feature is on by default and re-exports
 
 ```rust
 use std::sync::Arc;
-use dependency_factory::{
-    BuildError, DependencyFactory, DependencyFactoryHandle, Singleton,
-};
+use dependency_factory::{BuildError, DependencyFactory, Singleton};
 
 struct Config {
     greeting: String,
 }
 
 impl Singleton for Config {
-    fn build(_: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_: &mut DependencyFactory) -> Result<Self, BuildError> {
         Ok(Config { greeting: "hello".into() })
     }
 }
@@ -54,9 +59,14 @@ struct Greeter {
     config: Arc<Config>,
 }
 
-let factory = DependencyFactory::new();
+let mut factory = DependencyFactory::new();
 let greeter: Arc<Greeter> = factory.build().unwrap();
 assert_eq!(greeter.config.greeting, "hello");
+
+// Done assembling: share the frozen factory with the rest of the program.
+let frozen = factory.freeze();
+let handle = frozen.handle();
+assert!(Arc::ptr_eq(&handle.get::<Greeter>().unwrap().unwrap(), &greeter));
 ```
 
 ## License

@@ -28,6 +28,15 @@ impl BuildError {
         }
     }
 
+    /// The [`crate::DependencyFactory`] has not been frozen yet, so the
+    /// handle has nothing to resolve against.
+    pub fn factory_not_frozen() -> Self {
+        Self {
+            chain: Vec::new(),
+            source: Box::new(FactoryNotFrozen),
+        }
+    }
+
     /// The chain of resource type names recorded as the error propagated
     /// up the build stack. The first element is the innermost (originating)
     /// resource; the last is the outermost.
@@ -86,6 +95,17 @@ impl fmt::Display for FactoryDropped {
 }
 
 impl Error for FactoryDropped {}
+
+#[derive(Debug)]
+struct FactoryNotFrozen;
+
+impl fmt::Display for FactoryNotFrozen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the DependencyFactory has not been frozen yet")
+    }
+}
+
+impl Error for FactoryNotFrozen {}
 
 /// A dependency cycle detected during recursive resolution. Carried as
 /// the source of a [`BuildError`] when a cycle is the root cause; users

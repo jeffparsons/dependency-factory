@@ -1,9 +1,7 @@
-use std::sync::{Arc, Barrier};
-use std::thread;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex};
 
-use dependency_factory::{
-    BuildError, CycleError, DependencyFactory, DependencyFactoryHandle, Query, Singleton,
-};
+use dependency_factory::{BuildError, CycleError, DependencyFactory, Query, Singleton};
 
 fn cycle_of(err: &BuildError) -> &CycleError {
     err.source()
@@ -17,7 +15,7 @@ fn cycle_of(err: &BuildError) -> &CycleError {
 struct Selfish;
 
 impl Singleton for Selfish {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         let _self = factory.build::<Selfish>()?;
         Ok(Selfish)
     }
@@ -25,7 +23,7 @@ impl Singleton for Selfish {
 
 #[test]
 fn singleton_self_cycle_is_detected() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let err = factory.build::<Selfish>().unwrap_err();
     let cycle = cycle_of(&err);
     assert_eq!(cycle.path().len(), 2);
@@ -48,7 +46,7 @@ struct Beta {
 }
 
 impl Singleton for Alpha {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         Ok(Alpha {
             b: factory.build::<Beta>()?,
         })
@@ -56,7 +54,7 @@ impl Singleton for Alpha {
 }
 
 impl Singleton for Beta {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         Ok(Beta {
             a: factory.build::<Alpha>()?,
         })
@@ -65,7 +63,7 @@ impl Singleton for Beta {
 
 #[test]
 fn two_step_singleton_cycle_is_detected() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let err = factory.build::<Alpha>().unwrap_err();
     let cycle = cycle_of(&err);
     let path = cycle.path();
@@ -88,7 +86,7 @@ struct TreeKey(u32);
 impl Query for TreeKey {
     type Output = Tree;
 
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Tree, BuildError> {
+    fn build(&self, factory: &mut DependencyFactory) -> Result<Tree, BuildError> {
         match self.0 {
             1 => {
                 let _ = factory.build_for(TreeKey(2))?;
@@ -104,7 +102,7 @@ impl Query for TreeKey {
 
 #[test]
 fn query_cycle_on_different_keys_is_detected() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let err = factory.build_for(TreeKey(1)).unwrap_err();
     cycle_of(&err);
 }
@@ -117,7 +115,7 @@ struct SelfishKey;
 impl Query for SelfishKey {
     type Output = ();
 
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<(), BuildError> {
+    fn build(&self, factory: &mut DependencyFactory) -> Result<(), BuildError> {
         factory.build_for(SelfishKey)?;
         Ok(())
     }
@@ -125,7 +123,7 @@ impl Query for SelfishKey {
 
 #[test]
 fn query_self_cycle_is_detected() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let err = factory.build_for(SelfishKey).unwrap_err();
     cycle_of(&err);
 }
@@ -141,7 +139,7 @@ struct LinearKey(u32);
 impl Query for LinearKey {
     type Output = Linear;
 
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Linear, BuildError> {
+    fn build(&self, factory: &mut DependencyFactory) -> Result<Linear, BuildError> {
         if self.0 < 3 {
             factory.build_for(LinearKey(self.0 + 1))?;
         }
@@ -151,7 +149,7 @@ impl Query for LinearKey {
 
 #[test]
 fn linear_chain_of_distinct_keys_is_not_a_false_positive() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     factory
         .build_for(LinearKey(1))
         .expect("a linear chain of distinct keys must build successfully");
@@ -163,7 +161,7 @@ fn linear_chain_of_distinct_keys_is_not_a_false_positive() {
 struct Hub;
 
 impl Singleton for Hub {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         factory.build_for(SpokeKey("only"))?;
         Ok(Hub)
     }
@@ -178,7 +176,7 @@ struct Spoke;
 impl Query for SpokeKey {
     type Output = Spoke;
 
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Spoke, BuildError> {
+    fn build(&self, factory: &mut DependencyFactory) -> Result<Spoke, BuildError> {
         factory.build::<Hub>()?;
         Ok(Spoke)
     }
@@ -186,7 +184,7 @@ impl Query for SpokeKey {
 
 #[test]
 fn mixed_singleton_and_query_cycle_is_detected() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     let err = factory.build::<Hub>().unwrap_err();
     cycle_of(&err);
 }
@@ -201,68 +199,35 @@ struct Bridged {
 struct Bridgeable;
 
 impl Singleton for Bridgeable {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         Ok(Bridgeable)
     }
 }
 
 impl Singleton for Bridged {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         let local = factory.build::<Bridgeable>()?;
-        // The test pre-inserts a handle to the *other* factory into this
-        // one, so this build can recurse into a different factory while
-        // resolving the same Rust type.
+        // The test pre-inserts the *other* factory into this one, so this
+        // build can recurse into a different factory while resolving the
+        // same Rust type.
         let other = factory
-            .get::<DependencyFactoryHandle>()?
-            .expect("test setup must insert the other factory's handle");
-        let remote = other.build::<Bridgeable>()?;
+            .get::<Mutex<DependencyFactory>>()
+            .expect("test setup must insert the other factory");
+        let remote = other.lock().unwrap().build::<Bridgeable>()?;
         Ok(Bridged { local, remote })
     }
 }
 
 #[test]
 fn frames_in_distinct_factories_do_not_collide() {
-    let factory_a = DependencyFactory::new();
+    let mut factory_a = DependencyFactory::new();
     let factory_b = DependencyFactory::new();
-    factory_a.insert(factory_b.handle());
+    factory_a.insert(Mutex::new(factory_b));
 
     let bridged = factory_a
         .build::<Bridged>()
         .expect("recursing into a different factory for the same type must not look like a cycle");
     assert!(!Arc::ptr_eq(&bridged.local, &bridged.remote));
-}
-
-// --- Concurrent build of same key returns same Arc -------------------------
-
-struct Slowish {
-    counter: u32,
-}
-
-impl Singleton for Slowish {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
-        // Sleep so two threads' build windows overlap deterministically.
-        thread::sleep(std::time::Duration::from_millis(50));
-        Ok(Slowish { counter: 0 })
-    }
-}
-
-#[test]
-fn concurrent_builds_of_same_key_converge_on_one_arc() {
-    let factory = Arc::new(DependencyFactory::new());
-    let barrier = Arc::new(Barrier::new(2));
-
-    let mut handles = Vec::new();
-    for _ in 0..2 {
-        let factory = Arc::clone(&factory);
-        let barrier = Arc::clone(&barrier);
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            factory.build::<Slowish>().unwrap()
-        }));
-    }
-    let arcs: Vec<Arc<Slowish>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    assert!(Arc::ptr_eq(&arcs[0], &arcs[1]));
-    assert_eq!(arcs[0].counter, 0);
 }
 
 // --- Breadcrumb is balanced after a non-cycle error ------------------------
@@ -282,7 +247,7 @@ impl std::fmt::Display for Upstream {
 impl std::error::Error for Upstream {}
 
 impl Singleton for Failing {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -291,17 +256,41 @@ impl Singleton for Failing {
 struct OkResource;
 
 impl Singleton for OkResource {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_factory: &mut DependencyFactory) -> Result<Self, BuildError> {
         Ok(OkResource)
     }
 }
 
 #[test]
 fn breadcrumb_is_balanced_after_failed_build() {
-    let factory = DependencyFactory::new();
+    let mut factory = DependencyFactory::new();
     // First, a build that fails for a reason other than a cycle.
     let _ = factory.build::<Failing>().unwrap_err();
     // Then, a completely unrelated build on the same thread must succeed
     // without a stale breadcrumb entry causing a spurious cycle error.
+    factory.build::<OkResource>().unwrap();
+}
+
+// --- Breadcrumb is balanced after a panicking build ------------------------
+
+#[derive(Debug)]
+struct Panicking;
+
+impl Singleton for Panicking {
+    fn build(_factory: &mut DependencyFactory) -> Result<Self, BuildError> {
+        panic!("build blew up");
+    }
+}
+
+#[test]
+fn breadcrumb_is_balanced_after_panicking_build() {
+    let mut factory = DependencyFactory::new();
+    let outcome = catch_unwind(AssertUnwindSafe(|| factory.build::<Panicking>()));
+    assert!(outcome.is_err(), "the panic must propagate");
+    // Retrying the same key must not report a cycle against the frame the
+    // panicking build left behind.
+    let outcome = catch_unwind(AssertUnwindSafe(|| factory.build::<Panicking>()));
+    let payload = outcome.unwrap_err();
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"build blew up"));
     factory.build::<OkResource>().unwrap();
 }

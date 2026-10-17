@@ -35,7 +35,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #[automatically_derived]
         impl #impl_generics ::dependency_factory::Singleton for #ident #ty_generics #where_clause {
             fn build(
-                factory: &::dependency_factory::DependencyFactoryHandle,
+                factory: &mut ::dependency_factory::DependencyFactory,
             ) -> ::core::result::Result<Self, ::dependency_factory::BuildError> {
                 let _ = factory;
                 ::core::result::Result::Ok(#body)
@@ -89,7 +89,12 @@ fn field_expr(field: &Field) -> syn::Result<TokenStream2> {
     }
 
     Ok(match query {
-        Some(path) => quote! { factory.build_for(#path(factory)?)? },
+        // Bind the key first: `factory.build_for(key_fn(factory)?)` would
+        // need two live `&mut` borrows of `factory`.
+        Some(path) => quote! {{
+            let key = #path(factory)?;
+            factory.build_for(key)?
+        }},
         None => quote! { factory.build()? },
     })
 }
