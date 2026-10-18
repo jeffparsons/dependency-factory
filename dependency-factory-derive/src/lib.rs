@@ -89,7 +89,7 @@ fn field_expr(field: &Field) -> syn::Result<TokenStream2> {
     }
 
     Ok(match query {
-        Some(path) => quote! { factory.build_for(#path(factory)?)? },
-        None => quote! { factory.build()? },
+        Some(path) => quote! { factory.get_or_build_for(#path(factory)?)? },
+        None => quote! { factory.get_or_build()? },
     })
 }

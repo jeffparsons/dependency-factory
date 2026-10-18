@@ -1,144 +1,45 @@
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, Weak};
+use std::hash::{DefaultHasher, Hasher};
+use std::sync::{Arc, Weak};
 
 use crate::error::{BuildError, CycleError};
-
-/// Private nil-query adapter: identifies "the singleton instance of `R`"
-/// as a query key carrying no information. Singletons share storage with
-/// keyed queries via this adapter, so the internal machinery has only one
-/// mechanism.
-struct SingletonKey<R: ?Sized>(PhantomData<fn() -> R>);
-
-impl<R: ?Sized> SingletonKey<R> {
-    fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<R: ?Sized> Clone for SingletonKey<R> {
-    fn clone(&self) -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<R: ?Sized> PartialEq for SingletonKey<R> {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl<R: ?Sized> Eq for SingletonKey<R> {}
-
-impl<R: ?Sized> Hash for SingletonKey<R> {
-    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
-}
-
-type KeyMap<Q, V> = HashMap<Q, Arc<V>>;
-
-struct Inner {
-    /// Outer key: `TypeId` of the query key type `Q`.
-    /// Stored value: a boxed `KeyMap<Q, V>` — a `HashMap<Q, Arc<V>>` —
-    /// type-erased so that maps for different query types can live in one
-    /// outer map. The inner map is recovered by downcasting on lookup.
-    by_query_type: Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
-}
-
-impl Inner {
-    fn new() -> Self {
-        Self {
-            by_query_type: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn insert_keyed<Q, V>(&self, key: Q, value: V) -> Arc<V>
-    where
-        Q: Hash + Eq + Clone + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-    {
-        let arc = Arc::new(value);
-        let mut by_qtype = self.by_query_type.lock().unwrap();
-        let entry = by_qtype
-            .entry(TypeId::of::<Q>())
-            .or_insert_with(|| Box::new(KeyMap::<Q, V>::new()));
-        let map = entry
-            .downcast_mut::<KeyMap<Q, V>>()
-            .expect("stored map had a different value type than expected for this query type");
-        map.insert(key, arc.clone());
-        arc
-    }
-
-    fn get_keyed<Q, V>(&self, key: &Q) -> Option<Arc<V>>
-    where
-        Q: Hash + Eq + Clone + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-    {
-        let by_qtype = self.by_query_type.lock().unwrap();
-        let entry = by_qtype.get(&TypeId::of::<Q>())?;
-        let map = entry
-            .downcast_ref::<KeyMap<Q, V>>()
-            .expect("stored map had a different value type than expected for this query type");
-        map.get(key).cloned()
-    }
-
-    /// Insert `value` under `key` only if the slot is currently empty,
-    /// returning whichever `Arc` ends up cached. Used by the build path
-    /// so concurrent builders of the same key converge on a single
-    /// shared `Arc`.
-    fn insert_if_absent<Q, V>(&self, key: Q, value: V) -> Arc<V>
-    where
-        Q: Hash + Eq + Clone + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-    {
-        let arc = Arc::new(value);
-        let mut by_qtype = self.by_query_type.lock().unwrap();
-        let entry = by_qtype
-            .entry(TypeId::of::<Q>())
-            .or_insert_with(|| Box::new(KeyMap::<Q, V>::new()));
-        let map = entry
-            .downcast_mut::<KeyMap<Q, V>>()
-            .expect("stored map had a different value type than expected for this query type");
-        map.entry(key).or_insert(arc).clone()
-    }
-}
+use crate::registry::{Key, Registry, SingletonKey};
 
 thread_local! {
     static IN_PROGRESS: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
 }
 
 /// One entry on the per-thread "currently building" breadcrumb. Carries a
-/// factory identifier so frames produced by different factories on the
+/// registry identifier so frames produced by different factories on the
 /// same call stack do not look like cycles, plus a hashed key value so
-/// different keys of the same query type are distinguished.
+/// different keys of the same key type are distinguished.
 #[derive(Clone, Copy)]
 struct Frame {
-    factory: usize,
+    registry: usize,
     type_id: TypeId,
     key_hash: u64,
     type_name: &'static str,
 }
 
 impl Frame {
-    fn singleton<R: 'static>(inner: &Arc<Inner>) -> Self {
+    fn singleton<R: 'static>(registry: &Arc<Registry>) -> Self {
         Self {
-            factory: Arc::as_ptr(inner) as usize,
+            registry: Arc::as_ptr(registry) as usize,
             type_id: TypeId::of::<SingletonKey<R>>(),
             key_hash: 0,
             type_name: std::any::type_name::<R>(),
         }
     }
 
-    fn query<Q: Query>(inner: &Arc<Inner>, key: &Q) -> Self {
+    fn query<Q: Query>(registry: &Arc<Registry>, key: &Q) -> Self {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         Self {
-            factory: Arc::as_ptr(inner) as usize,
+            registry: Arc::as_ptr(registry) as usize,
             type_id: TypeId::of::<Q>(),
             key_hash: hasher.finish(),
-            type_name: std::any::type_name::<Q::Output>(),
+            type_name: std::any::type_name::<Q::Value>(),
         }
     }
 }
@@ -154,7 +55,7 @@ impl CycleGuard {
         IN_PROGRESS.with(|cell| -> Result<(), BuildError> {
             let mut breadcrumb = cell.borrow_mut();
             if let Some(start) = breadcrumb.iter().position(|f| {
-                f.factory == frame.factory
+                f.registry == frame.registry
                     && f.type_id == frame.type_id
                     && f.key_hash == frame.key_hash
             }) {
@@ -178,19 +79,39 @@ impl Drop for CycleGuard {
     }
 }
 
-/// The owning factory. Holds the storage alive; dropping it tears the
+/// The owning factory. Holds its [`Registry`] alive; dropping it tears the
 /// factory down. Most code should pass [`DependencyFactoryHandle`] around
 /// instead, and reach for `DependencyFactory` only at the application's
 /// top level where ownership lives.
+///
+/// The factory is one client of its registry: `get_or_build` reads the
+/// registry to short-circuit and commits what it builds through
+/// [`Registry::get_or_insert_with`]. Anything else may populate the same
+/// registry directly via [`registry`](Self::registry); a value already
+/// present always wins over one the factory would build.
+///
+/// Every operation forwards to a [`DependencyFactoryHandle`]; the owning
+/// type only adds the guarantee that the handle's upgrade succeeds.
 pub struct DependencyFactory {
-    inner: Arc<Inner>,
+    registry: Arc<Registry>,
 }
 
 impl DependencyFactory {
+    /// A factory over a fresh, empty registry.
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Inner::new()),
-        }
+        Self::with_registry(Arc::new(Registry::new()))
+    }
+
+    /// A factory over an existing registry, for example one that has been
+    /// populated by hand. Builds commit into it and see what is already
+    /// there. Use one factory per registry.
+    pub fn with_registry(registry: Arc<Registry>) -> Self {
+        Self { registry }
+    }
+
+    /// The registry this factory builds into.
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.registry
     }
 
     /// A cheap-to-clone handle to this factory. Internally weak, so
@@ -198,57 +119,32 @@ impl DependencyFactory {
     /// on its own and cannot create a reference cycle.
     pub fn handle(&self) -> DependencyFactoryHandle {
         DependencyFactoryHandle {
-            inner: Arc::downgrade(&self.inner),
+            registry: Arc::downgrade(&self.registry),
         }
-    }
-
-    /// Pre-populate the singleton slot for type `R`. Overwrites any
-    /// existing entry for `R`. Returns the cached `Arc<R>`.
-    pub fn insert<R: Send + Sync + 'static>(&self, value: R) -> Arc<R> {
-        self.inner.insert_keyed(SingletonKey::<R>::new(), value)
     }
 
     /// Return the cached singleton instance of `R`, if one is present.
     pub fn get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
-        self.inner
-            .get_keyed::<SingletonKey<R>, R>(&SingletonKey::<R>::new())
+        self.registry.get::<R>()
     }
 
-    /// Resolve the singleton instance of `R`, building it if it is not
-    /// already cached. Recursive `build` calls inside `R::build` see the
-    /// same factory through a [`DependencyFactoryHandle`].
-    pub fn build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
-        if let Some(arc) = self.get::<R>() {
-            return Ok(arc);
-        }
-        let _guard = CycleGuard::enter(Frame::singleton::<R>(&self.inner))?;
-        let value =
-            R::build(&self.handle()).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
-        Ok(self.inner.insert_if_absent(SingletonKey::<R>::new(), value))
+    /// Return the singleton instance of `R`, building it via `R::build`
+    /// if it is not already cached. Recursive `get_or_build` calls inside
+    /// `R::build` see the same factory through a
+    /// [`DependencyFactoryHandle`].
+    pub fn get_or_build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
+        self.handle().get_or_build()
     }
 
-    /// Pre-populate the cached output for `query`. Overwrites any existing
-    /// entry for the same key. Returns the cached `Arc<Q::Output>`.
-    pub fn insert_for<Q: Query>(&self, query: Q, value: Q::Output) -> Arc<Q::Output> {
-        self.inner.insert_keyed(query, value)
+    /// Return the cached value for `query`, if one is present.
+    pub fn get_for<Q: Query>(&self, query: &Q) -> Option<Arc<Q::Value>> {
+        self.registry.get_for(query)
     }
 
-    /// Return the cached output for `query`, if one is present.
-    pub fn get_for<Q: Query>(&self, query: Q) -> Option<Arc<Q::Output>> {
-        self.inner.get_keyed::<Q, Q::Output>(&query)
-    }
-
-    /// Resolve the output for `query`, building it via `Q::build` if it is
+    /// Return the value for `query`, building it via `Q::build` if it is
     /// not already cached.
-    pub fn build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Output>, BuildError> {
-        if let Some(arc) = self.get_for(query.clone()) {
-            return Ok(arc);
-        }
-        let _guard = CycleGuard::enter(Frame::query::<Q>(&self.inner, &query))?;
-        let value = query
-            .build(&self.handle())
-            .map_err(|e| e.push_frame(std::any::type_name::<Q::Output>()))?;
-        Ok(self.inner.insert_if_absent(query, value))
+    pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
+        self.handle().get_or_build_for(query)
     }
 }
 
@@ -265,77 +161,62 @@ impl Default for DependencyFactory {
 /// has been dropped.
 #[derive(Clone)]
 pub struct DependencyFactoryHandle {
-    inner: Weak<Inner>,
+    registry: Weak<Registry>,
 }
 
 impl DependencyFactoryHandle {
-    fn upgrade(&self) -> Result<Arc<Inner>, BuildError> {
-        self.inner.upgrade().ok_or_else(BuildError::factory_dropped)
+    fn upgrade(&self) -> Result<Arc<Registry>, BuildError> {
+        self.registry
+            .upgrade()
+            .ok_or_else(BuildError::factory_dropped)
     }
 
-    /// Pre-populate the singleton slot for type `R`. Overwrites any
-    /// existing entry for `R`. Returns the cached `Arc<R>`, or
-    /// [`BuildError::factory_dropped`] if the owning factory is gone.
-    pub fn insert<R: Send + Sync + 'static>(&self, value: R) -> Result<Arc<R>, BuildError> {
-        let inner = self.upgrade()?;
-        Ok(inner.insert_keyed(SingletonKey::<R>::new(), value))
+    /// The registry behind this handle, or [`BuildError::factory_dropped`]
+    /// if the owning factory is gone.
+    pub fn registry(&self) -> Result<Arc<Registry>, BuildError> {
+        self.upgrade()
     }
 
     /// Return the cached singleton instance of `R`, if one is present.
     /// `Ok(None)` means the factory is alive but no instance is cached;
     /// `Err(_)` means the factory itself has been dropped.
     pub fn get<R: Send + Sync + 'static>(&self) -> Result<Option<Arc<R>>, BuildError> {
-        let inner = self.upgrade()?;
-        Ok(inner.get_keyed::<SingletonKey<R>, R>(&SingletonKey::<R>::new()))
+        Ok(self.upgrade()?.get::<R>())
     }
 
-    /// Resolve the singleton instance of `R`, building it if it is not
-    /// already cached. Returns [`BuildError::factory_dropped`] if the
-    /// owning factory is gone.
-    pub fn build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
-        let inner = self.upgrade()?;
-        let key = SingletonKey::<R>::new();
-        if let Some(arc) = inner.get_keyed::<SingletonKey<R>, R>(&key) {
+    /// Return the singleton instance of `R`, building it via `R::build`
+    /// if it is not already cached. Returns
+    /// [`BuildError::factory_dropped`] if the owning factory is gone.
+    pub fn get_or_build<R: Singleton>(&self) -> Result<Arc<R>, BuildError> {
+        let registry = self.upgrade()?;
+        if let Some(arc) = registry.get::<R>() {
             return Ok(arc);
         }
-        let _guard = CycleGuard::enter(Frame::singleton::<R>(&inner))?;
+        let _guard = CycleGuard::enter(Frame::singleton::<R>(&registry))?;
         let value = R::build(self).map_err(|e| e.push_frame(std::any::type_name::<R>()))?;
-        Ok(inner.insert_if_absent(key, value))
+        Ok(registry.get_or_insert_with(|| value))
     }
 
-    /// Pre-populate the cached output for `query`. Overwrites any existing
-    /// entry for the same key. Returns [`BuildError::factory_dropped`] if
-    /// the owning factory is gone.
-    pub fn insert_for<Q: Query>(
-        &self,
-        query: Q,
-        value: Q::Output,
-    ) -> Result<Arc<Q::Output>, BuildError> {
-        let inner = self.upgrade()?;
-        Ok(inner.insert_keyed(query, value))
-    }
-
-    /// Return the cached output for `query`, if one is present.
-    /// `Ok(None)` means the factory is alive but no output is cached for
+    /// Return the cached value for `query`, if one is present.
+    /// `Ok(None)` means the factory is alive but no value is cached for
     /// this key; `Err(_)` means the factory itself has been dropped.
-    pub fn get_for<Q: Query>(&self, query: Q) -> Result<Option<Arc<Q::Output>>, BuildError> {
-        let inner = self.upgrade()?;
-        Ok(inner.get_keyed::<Q, Q::Output>(&query))
+    pub fn get_for<Q: Query>(&self, query: &Q) -> Result<Option<Arc<Q::Value>>, BuildError> {
+        Ok(self.upgrade()?.get_for(query))
     }
 
-    /// Resolve the output for `query`, building it via `Q::build` if it is
+    /// Return the value for `query`, building it via `Q::build` if it is
     /// not already cached. Returns [`BuildError::factory_dropped`] if the
     /// owning factory is gone.
-    pub fn build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Output>, BuildError> {
-        let inner = self.upgrade()?;
-        if let Some(arc) = inner.get_keyed::<Q, Q::Output>(&query) {
+    pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
+        let registry = self.upgrade()?;
+        if let Some(arc) = registry.get_for(&query) {
             return Ok(arc);
         }
-        let _guard = CycleGuard::enter(Frame::query::<Q>(&inner, &query))?;
+        let _guard = CycleGuard::enter(Frame::query(&registry, &query))?;
         let value = query
             .build(self)
-            .map_err(|e| e.push_frame(std::any::type_name::<Q::Output>()))?;
-        Ok(inner.insert_if_absent(query, value))
+            .map_err(|e| e.push_frame(std::any::type_name::<Q::Value>()))?;
+        Ok(registry.get_or_insert_with_for(query, || value))
     }
 }
 
@@ -351,16 +232,15 @@ pub trait Singleton: Send + Sync + Sized + 'static {
     fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError>;
 }
 
-/// A keyed resource: the implementor is the key value, and `Output` is the
-/// resource produced for that key. Multiple instances per output type may
-/// coexist, distinguished by the key value. Calling `build_for(key)` on the
-/// factory caches the produced output under that key.
+/// A keyed resource the factory can build: the implementor is the key
+/// value, and [`Key::Value`] is the resource produced for it. Multiple
+/// instances per value type may coexist, distinguished by the key value.
+/// Calling `get_or_build_for(key)` on the factory caches the produced
+/// value in the registry under that key.
 ///
 /// `build` must be cheap and side-effect-free: no I/O, no blocking, no
 /// contended locking. Expensive setup belongs in async lifecycle hooks
 /// (added later) or in the resource's own methods, not here.
-pub trait Query: Hash + Eq + Clone + Send + Sync + 'static {
-    type Output: Send + Sync + 'static;
-
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Self::Output, BuildError>;
+pub trait Query: Key {
+    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Self::Value, BuildError>;
 }

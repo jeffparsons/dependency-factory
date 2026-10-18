@@ -122,3 +122,51 @@ impl fmt::Display for CycleError {
 }
 
 impl Error for CycleError {}
+
+/// Returned by [`Registry::insert`](crate::Registry::insert) and
+/// [`Registry::insert_for`](crate::Registry::insert_for) when the slot is
+/// already filled. Carries the rejected value so the caller can recover it
+/// or fall back to [`Registry::replace`](crate::Registry::replace).
+///
+/// Implements [`Debug`](fmt::Debug) and [`Error`] without requiring the
+/// value to, so `unwrap` works for any registry value, and `?` converts it
+/// into a [`BuildError`] inside `build` methods.
+pub struct OccupiedError<V> {
+    value: V,
+}
+
+impl<V> OccupiedError<V> {
+    pub(crate) fn new(value: V) -> Self {
+        Self { value }
+    }
+
+    /// The value that was not inserted.
+    pub fn value(&self) -> &V {
+        &self.value
+    }
+
+    /// Recover the value that was not inserted.
+    pub fn into_value(self) -> V {
+        self.value
+    }
+}
+
+impl<V> fmt::Debug for OccupiedError<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OccupiedError")
+            .field("value_type", &std::any::type_name::<V>())
+            .finish()
+    }
+}
+
+impl<V> fmt::Display for OccupiedError<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the registry slot for this key is already occupied (value type {})",
+            std::any::type_name::<V>()
+        )
+    }
+}
+
+impl<V> Error for OccupiedError<V> {}

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dependency_factory::{
-    BuildError, DependencyFactory, DependencyFactoryHandle, Query, Singleton,
+    BuildError, DependencyFactory, DependencyFactoryHandle, Key, Query, Singleton,
 };
 
 struct Config {
@@ -30,9 +30,9 @@ struct Service {
 #[test]
 fn derive_chain_builds_and_caches() {
     let factory = DependencyFactory::new();
-    let s = factory.build::<Service>().unwrap();
-    let g = factory.build::<Greeter>().unwrap();
-    let c = factory.build::<Config>().unwrap();
+    let s = factory.get_or_build::<Service>().unwrap();
+    let g = factory.get_or_build::<Greeter>().unwrap();
+    let c = factory.get_or_build::<Config>().unwrap();
     assert!(Arc::ptr_eq(&s.greeter, &g));
     assert!(Arc::ptr_eq(&s.config, &c));
     assert!(Arc::ptr_eq(&s.greeter.config, &c));
@@ -73,7 +73,7 @@ impl std::fmt::Debug for Failing {
 #[test]
 fn derive_propagates_error_with_frame() {
     let factory = DependencyFactory::new();
-    let err = factory.build::<DependsOnFailing>().unwrap_err();
+    let err = factory.get_or_build::<DependsOnFailing>().unwrap_err();
     let chain = err.chain();
     assert_eq!(chain.len(), 2, "chain: {chain:?}");
     assert!(chain[0].ends_with("Failing"), "innermost: {}", chain[0]);
@@ -91,9 +91,11 @@ fn derive_propagates_error_with_frame() {
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct DbKey(&'static str);
 
-impl Query for DbKey {
-    type Output = String;
+impl Key for DbKey {
+    type Value = String;
+}
 
+impl Query for DbKey {
     fn build(&self, _factory: &DependencyFactoryHandle) -> Result<String, BuildError> {
         Ok(format!("db-{}", self.0))
     }
@@ -112,9 +114,9 @@ struct UsersService {
 #[test]
 fn derive_uses_query_for_keyed_field() {
     let factory = DependencyFactory::new();
-    let s = factory.build::<UsersService>().unwrap();
+    let s = factory.get_or_build::<UsersService>().unwrap();
     assert_eq!(*s.db, "db-users");
-    let direct = factory.build_for(DbKey("users")).unwrap();
+    let direct = factory.get_or_build_for(DbKey("users")).unwrap();
     assert!(Arc::ptr_eq(&s.db, &direct));
 }
 
@@ -122,7 +124,7 @@ fn derive_uses_query_for_keyed_field() {
 // derives the key from it. This demonstrates that `query =` functions are not
 // limited to constants.
 fn config_named_key(factory: &DependencyFactoryHandle) -> Result<DbKey, BuildError> {
-    let cfg = factory.build::<Config>()?;
+    let cfg = factory.get_or_build::<Config>()?;
     let name: &'static str = if cfg.greeting == "hello" {
         "hello-db"
     } else {
@@ -140,7 +142,7 @@ struct ConfiguredService {
 #[test]
 fn derive_query_key_can_resolve_from_factory() {
     let factory = DependencyFactory::new();
-    let s = factory.build::<ConfiguredService>().unwrap();
+    let s = factory.get_or_build::<ConfiguredService>().unwrap();
     assert_eq!(*s.db, "db-hello-db");
 }
 
@@ -150,8 +152,8 @@ struct GreeterWrap(Arc<Greeter>);
 #[test]
 fn derive_supports_tuple_struct() {
     let factory = DependencyFactory::new();
-    let w = factory.build::<GreeterWrap>().unwrap();
-    let g = factory.build::<Greeter>().unwrap();
+    let w = factory.get_or_build::<GreeterWrap>().unwrap();
+    let g = factory.get_or_build::<Greeter>().unwrap();
     assert!(Arc::ptr_eq(&w.0, &g));
 }
 
@@ -162,8 +164,8 @@ struct Marker;
 fn derive_supports_unit_struct() {
     let factory = DependencyFactory::new();
     // Builds without panic; Arc identity confirms caching works the same way.
-    let a = factory.build::<Marker>().unwrap();
-    let b = factory.build::<Marker>().unwrap();
+    let a = factory.get_or_build::<Marker>().unwrap();
+    let b = factory.get_or_build::<Marker>().unwrap();
     assert!(Arc::ptr_eq(&a, &b));
 }
 
@@ -176,7 +178,7 @@ struct Pair<A: Singleton, B: Singleton> {
 #[test]
 fn derive_supports_generic_struct() {
     let factory = DependencyFactory::new();
-    let p = factory.build::<Pair<Config, Greeter>>().unwrap();
+    let p = factory.get_or_build::<Pair<Config, Greeter>>().unwrap();
     assert_eq!(p.a.greeting, "hello");
     assert_eq!(p.b.config.greeting, "hello");
 }

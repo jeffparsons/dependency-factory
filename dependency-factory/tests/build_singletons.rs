@@ -21,7 +21,7 @@ struct Greeter {
 impl Singleton for Greeter {
     fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
         Ok(Greeter {
-            config: factory.build::<Config>()?,
+            config: factory.get_or_build::<Config>()?,
         })
     }
 }
@@ -34,7 +34,7 @@ struct Service {
 impl Singleton for Service {
     fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
         Ok(Service {
-            greeter: factory.build::<Greeter>()?,
+            greeter: factory.get_or_build::<Greeter>()?,
             name: "world".into(),
         })
     }
@@ -43,7 +43,7 @@ impl Singleton for Service {
 #[test]
 fn auto_builds_a_dependency_chain() {
     let factory = DependencyFactory::new();
-    let service = factory.build::<Service>().unwrap();
+    let service = factory.get_or_build::<Service>().unwrap();
     assert_eq!(service.greeter.config.greeting, "hello");
     assert_eq!(service.name, "world");
 }
@@ -51,20 +51,23 @@ fn auto_builds_a_dependency_chain() {
 #[test]
 fn build_caches_each_resource() {
     let factory = DependencyFactory::new();
-    let s1 = factory.build::<Service>().unwrap();
-    let s2 = factory.build::<Service>().unwrap();
+    let s1 = factory.get_or_build::<Service>().unwrap();
+    let s2 = factory.get_or_build::<Service>().unwrap();
     assert!(Arc::ptr_eq(&s1, &s2));
-    let g1 = factory.build::<Greeter>().unwrap();
+    let g1 = factory.get_or_build::<Greeter>().unwrap();
     assert!(Arc::ptr_eq(&s1.greeter, &g1));
 }
 
 #[test]
 fn pre_inserted_resource_short_circuits_build() {
     let factory = DependencyFactory::new();
-    let custom = factory.insert(Config {
-        greeting: "g'day".into(),
-    });
-    let greeter = factory.build::<Greeter>().unwrap();
+    let custom = factory
+        .registry()
+        .insert(Config {
+            greeting: "g'day".into(),
+        })
+        .unwrap();
+    let greeter = factory.get_or_build::<Greeter>().unwrap();
     assert!(Arc::ptr_eq(&greeter.config, &custom));
     assert_eq!(greeter.config.greeting, "g'day");
 }
@@ -98,7 +101,7 @@ struct DependsOnFailing {
 impl Singleton for DependsOnFailing {
     fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
         Ok(DependsOnFailing {
-            f: factory.build::<Failing>()?,
+            f: factory.get_or_build::<Failing>()?,
         })
     }
 }
@@ -106,7 +109,7 @@ impl Singleton for DependsOnFailing {
 #[test]
 fn errors_carry_a_chain_of_frames() {
     let factory = DependencyFactory::new();
-    let err = factory.build::<DependsOnFailing>().unwrap_err();
+    let err = factory.get_or_build::<DependsOnFailing>().unwrap_err();
     let chain = err.chain();
     assert_eq!(chain.len(), 2);
     assert!(

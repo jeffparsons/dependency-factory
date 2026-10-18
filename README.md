@@ -13,12 +13,20 @@ Two kinds of resources are supported:
 
 - **Singletons**: one instance per type. Implement `Singleton`, or
   `#[derive(Singleton)]` and let the macro write the dependency wiring for you.
-- **Queries**: many instances per type, parameterised by a key value.
-  Implement `Query` to define the key type and how the resource is built
-  from it.
+- **Keyed resources**: many instances per type, parameterised by a key
+  value. Implement `Key` to pair a key type with its value type, and
+  `Query` on top of it to say how the value is built from the key.
 
 Cycles in the dependency graph are detected at runtime and surfaced as
 structured errors with the full path through the cycle.
+
+Resources live in a `Registry`, a thread-safe type-keyed map that knows
+nothing about building. The factory is one client of its registry: it
+reads it to short-circuit and commits what it builds with
+`get_or_insert_with`, so a value already in the registry always wins.
+Anything else can populate the same registry by hand through
+`factory.registry()`, with `insert` (fails if the slot is taken) or
+`replace` (overwrites).
 
 ## Usage
 
@@ -55,8 +63,14 @@ struct Greeter {
 }
 
 let factory = DependencyFactory::new();
-let greeter: Arc<Greeter> = factory.build().unwrap();
+let greeter: Arc<Greeter> = factory.get_or_build().unwrap();
 assert_eq!(greeter.config.greeting, "hello");
+
+// A value placed in the registry by hand is used instead of building one.
+let factory = DependencyFactory::new();
+factory.registry().insert(Config { greeting: "g'day".into() }).unwrap();
+let greeter: Arc<Greeter> = factory.get_or_build().unwrap();
+assert_eq!(greeter.config.greeting, "g'day");
 ```
 
 ## License
