@@ -1,15 +1,13 @@
 use std::sync::Arc;
 
-use dependency_factory::{
-    BuildError, DependencyFactory, DependencyFactoryHandle, Key, Query, Singleton,
-};
+use dependency_factory::{BuildError, Builder, DependencyFactory, Key, Query, Singleton};
 
 struct Config {
     greeting: String,
 }
 
 impl Singleton for Config {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(Config {
             greeting: "hello".into(),
         })
@@ -53,7 +51,7 @@ impl std::error::Error for Upstream {}
 struct Failing;
 
 impl Singleton for Failing {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -96,12 +94,12 @@ impl Key for DbKey {
 }
 
 impl Query for DbKey {
-    fn build(&self, _factory: &DependencyFactoryHandle) -> Result<String, BuildError> {
+    fn build(&self, _builder: &mut Builder) -> Result<String, BuildError> {
         Ok(format!("db-{}", self.0))
     }
 }
 
-fn users_db_key(_factory: &DependencyFactoryHandle) -> Result<DbKey, BuildError> {
+fn users_db_key(_builder: &mut Builder) -> Result<DbKey, BuildError> {
     Ok(DbKey("users"))
 }
 
@@ -123,8 +121,8 @@ fn derive_uses_query_for_keyed_field() {
 // Key fn that itself uses the factory handle: it resolves a singleton, then
 // derives the key from it. This demonstrates that `query =` functions are not
 // limited to constants.
-fn config_named_key(factory: &DependencyFactoryHandle) -> Result<DbKey, BuildError> {
-    let cfg = factory.get_or_build::<Config>()?;
+fn config_named_key(builder: &mut Builder) -> Result<DbKey, BuildError> {
+    let cfg = builder.get_or_build::<Config>()?;
     let name: &'static str = if cfg.greeting == "hello" {
         "hello-db"
     } else {

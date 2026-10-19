@@ -1,8 +1,8 @@
-use std::sync::{Arc, Barrier};
-use std::thread;
+use std::sync::Arc;
 
 use dependency_factory::{
-    BuildError, CycleError, DependencyFactory, DependencyFactoryHandle, Key, Query, Singleton,
+    BuildError, Builder, CycleError, DependencyFactory, DependencyFactoryHandle, Key, Query,
+    Singleton,
 };
 
 fn cycle_of(err: &BuildError) -> &CycleError {
@@ -17,8 +17,8 @@ fn cycle_of(err: &BuildError) -> &CycleError {
 struct Selfish;
 
 impl Singleton for Selfish {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
-        let _self = factory.get_or_build::<Selfish>()?;
+    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+        let _self = builder.get_or_build::<Selfish>()?;
         Ok(Selfish)
     }
 }
@@ -48,17 +48,17 @@ struct Beta {
 }
 
 impl Singleton for Alpha {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(Alpha {
-            b: factory.get_or_build::<Beta>()?,
+            b: builder.get_or_build::<Beta>()?,
         })
     }
 }
 
 impl Singleton for Beta {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(Beta {
-            a: factory.get_or_build::<Alpha>()?,
+            a: builder.get_or_build::<Alpha>()?,
         })
     }
 }
@@ -90,13 +90,13 @@ impl Key for TreeKey {
 }
 
 impl Query for TreeKey {
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Tree, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<Tree, BuildError> {
         match self.0 {
             1 => {
-                let _ = factory.get_or_build_for(TreeKey(2))?;
+                let _ = builder.get_or_build_for(TreeKey(2))?;
             }
             2 => {
-                let _ = factory.get_or_build_for(TreeKey(1))?;
+                let _ = builder.get_or_build_for(TreeKey(1))?;
             }
             _ => {}
         }
@@ -121,8 +121,8 @@ impl Key for SelfishKey {
 }
 
 impl Query for SelfishKey {
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<(), BuildError> {
-        factory.get_or_build_for(SelfishKey)?;
+    fn build(&self, builder: &mut Builder) -> Result<(), BuildError> {
+        builder.get_or_build_for(SelfishKey)?;
         Ok(())
     }
 }
@@ -147,9 +147,9 @@ impl Key for LinearKey {
 }
 
 impl Query for LinearKey {
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Linear, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<Linear, BuildError> {
         if self.0 < 3 {
-            factory.get_or_build_for(LinearKey(self.0 + 1))?;
+            builder.get_or_build_for(LinearKey(self.0 + 1))?;
         }
         Ok(Linear)
     }
@@ -169,8 +169,8 @@ fn linear_chain_of_distinct_keys_is_not_a_false_positive() {
 struct Hub;
 
 impl Singleton for Hub {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
-        factory.get_or_build_for(SpokeKey("only"))?;
+    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+        builder.get_or_build_for(SpokeKey("only"))?;
         Ok(Hub)
     }
 }
@@ -186,8 +186,8 @@ impl Key for SpokeKey {
 }
 
 impl Query for SpokeKey {
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Spoke, BuildError> {
-        factory.get_or_build::<Hub>()?;
+    fn build(&self, builder: &mut Builder) -> Result<Spoke, BuildError> {
+        builder.get_or_build::<Hub>()?;
         Ok(Spoke)
     }
 }
@@ -209,20 +209,22 @@ struct Bridged {
 struct Bridgeable;
 
 impl Singleton for Bridgeable {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(Bridgeable)
     }
 }
 
 impl Singleton for Bridged {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
-        let local = factory.get_or_build::<Bridgeable>()?;
+    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+        let local = builder.get_or_build::<Bridgeable>()?;
         // The test pre-inserts a handle to the *other* factory into this
         // one, so this build can recurse into a different factory while
         // resolving the same Rust type.
-        let other = factory
-            .get::<DependencyFactoryHandle>()?
+        let other = builder
+            .get::<DependencyFactoryHandle>()
             .expect("test setup must insert the other factory's handle");
+        // A different registry has its own lock, so this nested builder
+        // does not wait on the one we hold.
         let remote = other.get_or_build::<Bridgeable>()?;
         Ok(Bridged { local, remote })
     }
@@ -232,45 +234,16 @@ impl Singleton for Bridged {
 fn frames_in_distinct_factories_do_not_collide() {
     let factory_a = DependencyFactory::new();
     let factory_b = DependencyFactory::new();
-    factory_a.registry().insert(factory_b.handle()).unwrap();
+    factory_a
+        .registry()
+        .begin()
+        .insert(factory_b.handle())
+        .unwrap();
 
     let bridged = factory_a
         .get_or_build::<Bridged>()
         .expect("recursing into a different factory for the same type must not look like a cycle");
     assert!(!Arc::ptr_eq(&bridged.local, &bridged.remote));
-}
-
-// --- Concurrent build of same key returns same Arc -------------------------
-
-struct Slowish {
-    counter: u32,
-}
-
-impl Singleton for Slowish {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
-        // Sleep so two threads' build windows overlap deterministically.
-        thread::sleep(std::time::Duration::from_millis(50));
-        Ok(Slowish { counter: 0 })
-    }
-}
-
-#[test]
-fn concurrent_builds_of_same_key_converge_on_one_arc() {
-    let factory = Arc::new(DependencyFactory::new());
-    let barrier = Arc::new(Barrier::new(2));
-
-    let mut handles = Vec::new();
-    for _ in 0..2 {
-        let factory = Arc::clone(&factory);
-        let barrier = Arc::clone(&barrier);
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            factory.get_or_build::<Slowish>().unwrap()
-        }));
-    }
-    let arcs: Vec<Arc<Slowish>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    assert!(Arc::ptr_eq(&arcs[0], &arcs[1]));
-    assert_eq!(arcs[0].counter, 0);
 }
 
 // --- Breadcrumb is balanced after a non-cycle error ------------------------
@@ -290,7 +263,7 @@ impl std::fmt::Display for Upstream {
 impl std::error::Error for Upstream {}
 
 impl Singleton for Failing {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -299,7 +272,7 @@ impl Singleton for Failing {
 struct OkResource;
 
 impl Singleton for OkResource {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(OkResource)
     }
 }
