@@ -18,3 +18,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for downcasting when a cycle is detected.
 - `#[derive(Singleton)]` proc macro with a `#[factory(query = key_fn)]`
   field attribute for opting individual fields into `Query`-keyed resolution.
+- Indexes: `Transaction::index::<T>(arc)` adds an `Arc<T>` (usually a
+  trait object) to the registry's index for `T`, and `indexed::<T>()` on
+  `Registry`, `Transaction`, `Builder`, `DependencyFactory` and
+  `DependencyFactoryHandle` lists it in insertion order. Index changes are
+  published with the transaction's batch, and `replace` removes the
+  previous value from every index it was in.
+- `Singleton::register` and `Query::register` hooks, run once right after
+  a built value is cached, for adding it to its indexes or registering it
+  with other resources. `#[derive(Singleton)]` generates the hook from a
+  struct-level `#[factory(index(dyn Trait, ...))]` attribute.
