@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use dependency_factory::{
-    BuildError, DependencyFactory, DependencyFactoryHandle, Key, Query, Singleton,
-};
+use dependency_factory::{BuildError, Builder, DependencyFactory, Key, Query, Singleton};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -18,7 +16,7 @@ impl Key for DbKey {
 }
 
 impl Query for DbKey {
-    fn build(&self, _factory: &DependencyFactoryHandle) -> Result<Db, BuildError> {
+    fn build(&self, _builder: &mut Builder) -> Result<Db, BuildError> {
         Ok(Db {
             name: self.0.into(),
         })
@@ -40,9 +38,9 @@ impl Key for ServiceKey {
 }
 
 impl Query for ServiceKey {
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<Service, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<Service, BuildError> {
         Ok(Service {
-            db: factory.get_or_build_for(DbKey(self.0))?,
+            db: builder.get_or_build_for(DbKey(self.0))?,
             label: self.0,
         })
     }
@@ -80,6 +78,7 @@ fn pre_inserted_query_output_short_circuits_build() {
     let factory = DependencyFactory::new();
     let custom = factory
         .registry()
+        .begin()
         .insert_for(
             DbKey("override"),
             Db {
@@ -114,7 +113,7 @@ impl Key for FailingKey {
 }
 
 impl Query for FailingKey {
-    fn build(&self, _factory: &DependencyFactoryHandle) -> Result<Failing, BuildError> {
+    fn build(&self, _builder: &mut Builder) -> Result<Failing, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -133,9 +132,9 @@ impl Key for DependsOnFailingKey {
 }
 
 impl Query for DependsOnFailingKey {
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<DependsOnFailing, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<DependsOnFailing, BuildError> {
         Ok(DependsOnFailing {
-            f: factory.get_or_build_for(FailingKey)?,
+            f: builder.get_or_build_for(FailingKey)?,
         })
     }
 }
@@ -165,7 +164,7 @@ fn errors_carry_chain_of_output_type_names() {
 struct Clock;
 
 impl Singleton for Clock {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(Clock)
     }
 }
@@ -183,9 +182,9 @@ impl Key for TimedDbKey {
 }
 
 impl Query for TimedDbKey {
-    fn build(&self, factory: &DependencyFactoryHandle) -> Result<TimedDb, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<TimedDb, BuildError> {
         Ok(TimedDb {
-            _clock: factory.get_or_build::<Clock>()?,
+            _clock: builder.get_or_build::<Clock>()?,
             name: self.0.into(),
         })
     }

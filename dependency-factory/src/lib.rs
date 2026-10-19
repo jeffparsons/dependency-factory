@@ -1,10 +1,13 @@
+mod builder;
 mod error;
 mod factory;
 mod registry;
+mod store;
 
+pub use builder::Builder;
 pub use error::{BuildError, CycleError, OccupiedError};
 pub use factory::{DependencyFactory, DependencyFactoryHandle, Query, Singleton};
-pub use registry::{Key, Registry};
+pub use registry::{Key, Registry, Transaction};
 
 #[cfg(feature = "derive")]
 pub use dependency_factory_derive::Singleton;
@@ -19,14 +22,14 @@ mod tests {
     fn factory_reads_its_registry() {
         let factory = DependencyFactory::new();
         assert!(factory.get::<u32>().is_none());
-        factory.registry().insert(42_u32).unwrap();
+        factory.registry().begin().insert(42_u32).unwrap();
         assert_eq!(*factory.get::<u32>().unwrap(), 42);
     }
 
     #[test]
     fn factory_over_a_prepopulated_registry() {
         let registry = Arc::new(Registry::new());
-        registry.insert(42_u32).unwrap();
+        registry.begin().insert(42_u32).unwrap();
         let factory = DependencyFactory::with_registry(Arc::clone(&registry));
         assert!(Arc::ptr_eq(factory.registry(), &registry));
         assert_eq!(*factory.get::<u32>().unwrap(), 42);
@@ -35,7 +38,7 @@ mod tests {
     #[test]
     fn handle_can_resolve() {
         let factory = DependencyFactory::new();
-        factory.registry().insert(42_u32).unwrap();
+        factory.registry().begin().insert(42_u32).unwrap();
         let handle = factory.handle();
         assert_eq!(*handle.get::<u32>().unwrap().unwrap(), 42);
     }
@@ -44,7 +47,7 @@ mod tests {
     fn handle_exposes_the_registry() {
         let factory = DependencyFactory::new();
         let handle = factory.handle();
-        handle.registry().unwrap().insert(42_u32).unwrap();
+        handle.registry().unwrap().begin().insert(42_u32).unwrap();
         assert_eq!(*factory.get::<u32>().unwrap(), 42);
     }
 
@@ -62,7 +65,7 @@ mod tests {
         let factory = DependencyFactory::new();
         let h1 = factory.handle();
         let h2 = h1.clone();
-        h1.registry().unwrap().insert(1_u32).unwrap();
+        h1.registry().unwrap().begin().insert(1_u32).unwrap();
         assert_eq!(*h2.get::<u32>().unwrap().unwrap(), 1);
     }
 
@@ -74,7 +77,7 @@ mod tests {
     }
 
     impl Query for StringKey {
-        fn build(&self, _factory: &DependencyFactoryHandle) -> Result<String, BuildError> {
+        fn build(&self, _builder: &mut Builder) -> Result<String, BuildError> {
             Ok(format!("built-{}", self.0))
         }
     }
@@ -85,6 +88,7 @@ mod tests {
         assert!(factory.get_for(&StringKey(7)).is_none());
         let inserted = factory
             .registry()
+            .begin()
             .insert_for(StringKey(7), "seven".to_string())
             .unwrap();
         let got = factory.get_for(&StringKey(7)).unwrap();
@@ -111,6 +115,7 @@ mod tests {
         let factory = DependencyFactory::new();
         let inserted = factory
             .registry()
+            .begin()
             .insert_for(StringKey(3), "by hand".into())
             .unwrap();
         let built = factory.get_or_build_for(StringKey(3)).unwrap();
@@ -122,6 +127,7 @@ mod tests {
         let factory = DependencyFactory::new();
         factory
             .registry()
+            .begin()
             .insert_for(StringKey(1), "one".into())
             .unwrap();
         let handle = factory.handle();

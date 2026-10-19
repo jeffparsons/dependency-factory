@@ -25,8 +25,27 @@ nothing about building. The factory is one client of its registry: it
 reads it to short-circuit and commits what it builds with
 `get_or_insert_with`, so a value already in the registry always wins.
 Anything else can populate the same registry by hand through
-`factory.registry()`, with `insert` (fails if the slot is taken) or
-`replace` (overwrites).
+`factory.registry()`.
+
+Every write goes through a transaction: `registry.begin()` returns a
+`Transaction` carrying `insert` (fails if the slot is taken), `replace`
+(overwrites) and `get_or_insert_with`. Its writes are published as one
+batch when it commits, which dropping it does, so
+`registry.begin().insert(value)` is a single write and a held
+transaction is a batch; `commit()` says so explicitly, and `discard()`
+throws the batch away. Only one transaction is open at a time. Reads
+live on the registry and never wait for one, not even a build in
+progress; a committing transaction holds readers off only for the
+moment it takes to swap its batch in.
+
+Building goes through a `Builder`, which `Singleton::build` and
+`Query::build` receive and pass down to resolve their own dependencies.
+A builder is a registry transaction plus the record of builds in
+progress, so each resource is built exactly once even when several
+threads ask for it, and every dependency cycle is seen by one builder
+and reported. `get_or_build` takes a builder for the duration of the
+call; `factory.builder()` hands one out to hold across several. Lookups
+that never build (`get`, `get_for`) take no builder and never wait.
 
 ## Usage
 
@@ -43,16 +62,14 @@ The `derive` feature is on by default and re-exports
 
 ```rust
 use std::sync::Arc;
-use dependency_factory::{
-    BuildError, DependencyFactory, DependencyFactoryHandle, Singleton,
-};
+use dependency_factory::{BuildError, Builder, DependencyFactory, Singleton};
 
 struct Config {
     greeting: String,
 }
 
 impl Singleton for Config {
-    fn build(_: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_: &mut Builder) -> Result<Self, BuildError> {
         Ok(Config { greeting: "hello".into() })
     }
 }
@@ -68,7 +85,7 @@ assert_eq!(greeter.config.greeting, "hello");
 
 // A value placed in the registry by hand is used instead of building one.
 let factory = DependencyFactory::new();
-factory.registry().insert(Config { greeting: "g'day".into() }).unwrap();
+factory.registry().begin().insert(Config { greeting: "g'day".into() }).unwrap();
 let greeter: Arc<Greeter> = factory.get_or_build().unwrap();
 assert_eq!(greeter.config.greeting, "g'day");
 ```

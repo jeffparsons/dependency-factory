@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use dependency_factory::{BuildError, DependencyFactory, DependencyFactoryHandle, Singleton};
+use dependency_factory::{BuildError, Builder, DependencyFactory, Singleton};
 
 struct Config {
     greeting: String,
 }
 
 impl Singleton for Config {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(Config {
             greeting: "hello".into(),
         })
@@ -19,9 +19,9 @@ struct Greeter {
 }
 
 impl Singleton for Greeter {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(Greeter {
-            config: factory.get_or_build::<Config>()?,
+            config: builder.get_or_build::<Config>()?,
         })
     }
 }
@@ -32,9 +32,9 @@ struct Service {
 }
 
 impl Singleton for Service {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(Service {
-            greeter: factory.get_or_build::<Greeter>()?,
+            greeter: builder.get_or_build::<Greeter>()?,
             name: "world".into(),
         })
     }
@@ -63,6 +63,7 @@ fn pre_inserted_resource_short_circuits_build() {
     let factory = DependencyFactory::new();
     let custom = factory
         .registry()
+        .begin()
         .insert(Config {
             greeting: "g'day".into(),
         })
@@ -87,7 +88,7 @@ impl std::fmt::Display for Upstream {
 impl std::error::Error for Upstream {}
 
 impl Singleton for Failing {
-    fn build(_factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -99,9 +100,9 @@ struct DependsOnFailing {
 }
 
 impl Singleton for DependsOnFailing {
-    fn build(factory: &DependencyFactoryHandle) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
         Ok(DependsOnFailing {
-            f: factory.get_or_build::<Failing>()?,
+            f: builder.get_or_build::<Failing>()?,
         })
     }
 }
