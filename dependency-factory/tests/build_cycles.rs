@@ -108,7 +108,72 @@ impl Query for TreeKey {
 fn query_cycle_on_different_keys_is_detected() {
     let factory = DependencyFactory::new();
     let err = factory.get_or_build_for(TreeKey(1)).unwrap_err();
-    cycle_of(&err);
+    assert_eq!(cycle_of(&err).path().len(), 3);
+}
+
+// --- Keys that hash alike but differ: Tenant(1, 0) -> Tenant(1, 1) --------
+
+/// A key whose `Hash` covers only part of what `Eq` compares. That is
+/// allowed: equal keys must hash alike, but unequal keys may too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TenantKey {
+    id: u32,
+    region: u8,
+}
+
+impl std::hash::Hash for TenantKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl Key for TenantKey {
+    type Value = String;
+}
+
+impl Query for TenantKey {
+    fn build(&self, builder: &mut Builder) -> Result<String, BuildError> {
+        match self.region {
+            // A different key of the same tenant, with the same hash.
+            0 => {
+                builder.get_or_build_for(TenantKey {
+                    id: self.id,
+                    region: 1,
+                })?;
+            }
+            // Itself.
+            2 => {
+                builder.get_or_build_for(TenantKey {
+                    id: self.id,
+                    region: 2,
+                })?;
+            }
+            _ => {}
+        }
+        Ok(format!("{}-{}", self.id, self.region))
+    }
+}
+
+#[test]
+fn keys_that_hash_alike_but_differ_are_not_a_cycle() {
+    let factory = DependencyFactory::new();
+    let value = factory
+        .get_or_build_for(TenantKey { id: 1, region: 0 })
+        .expect("distinct keys with equal hashes must not look like a cycle");
+    assert_eq!(*value, "1-0");
+    let dependency = factory
+        .get_or_build_for(TenantKey { id: 1, region: 1 })
+        .unwrap();
+    assert_eq!(*dependency, "1-1");
+}
+
+#[test]
+fn a_key_that_hashes_like_others_still_detects_its_own_cycle() {
+    let factory = DependencyFactory::new();
+    let err = factory
+        .get_or_build_for(TenantKey { id: 1, region: 2 })
+        .unwrap_err();
+    assert_eq!(cycle_of(&err).path().len(), 2);
 }
 
 // --- Query self-cycle on the same key --------------------------------------
