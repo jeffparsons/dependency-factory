@@ -258,7 +258,7 @@ fn a_register_error_is_attributed_like_a_build_error_and_the_value_stays_cached(
     let chain: Vec<&str> = err
         .chain()
         .iter()
-        .map(|f| f.rsplit("::").next().unwrap())
+        .map(|f| f.type_name().rsplit("::").next().unwrap())
         .collect();
     assert_eq!(chain, ["Unregisterable", "NeedsUnregisterable"]);
     assert!(factory.get::<Unregisterable>().is_some());
@@ -277,7 +277,7 @@ impl Lifecycle for Conn {
     }
 }
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct ConnKey(&'static str);
 
 impl Key for ConnKey {

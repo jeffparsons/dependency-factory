@@ -15,7 +15,11 @@ use crate::store::{Store, data_ptr};
 ///
 /// Implement `Key` alone for resources that are inserted by hand, and
 /// [`Query`](crate::Query) on top of it for resources the factory can build.
-pub trait Key: Hash + Eq + Clone + Send + Sync + 'static {
+///
+/// A key appears in error messages through its [`Debug`](fmt::Debug)
+/// impl, as in `while building Db for DbKey("users")`. A key that holds
+/// a secret should implement `Debug` by hand and leave the secret out.
+pub trait Key: fmt::Debug + Hash + Eq + Clone + Send + Sync + 'static {
     type Value: Send + Sync + 'static;
 }
 
@@ -46,6 +50,12 @@ impl<R: ?Sized> Eq for SingletonKey<R> {}
 
 impl<R: ?Sized> Hash for SingletonKey<R> {
     fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
+}
+
+impl<R: ?Sized> fmt::Debug for SingletonKey<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SingletonKey<{}>", std::any::type_name::<R>())
+    }
 }
 
 impl<R: Send + Sync + 'static> Key for SingletonKey<R> {

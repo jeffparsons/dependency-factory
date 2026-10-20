@@ -1,12 +1,50 @@
 use std::error::Error;
 use std::fmt;
 
+/// One resource on the way to an error: the type of the value that was
+/// being built and, for a keyed resource, the key it was being built
+/// for. [`BuildError::chain`] and [`CycleError::path`] are lists of
+/// these. `Display` renders one as `Db for DbKey("users")`, or as just
+/// `Config` for a singleton.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    type_name: &'static str,
+    key: Option<String>,
+}
+
+impl Frame {
+    pub(crate) fn new(type_name: &'static str, key: Option<String>) -> Self {
+        Self { type_name, key }
+    }
+
+    /// The type of the value, as [`std::any::type_name`] spells it.
+    pub fn type_name(&self) -> &'static str {
+        self.type_name
+    }
+
+    /// The key the value was being built for, as its `Debug` impl
+    /// renders it, or `None` for a singleton.
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+}
+
+impl fmt::Display for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.type_name)?;
+        if let Some(key) = &self.key {
+            write!(f, " for {key}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Error returned when a resource cannot be obtained from the factory.
 ///
-/// Carries a chain of `while building <type>` frames pushed by the factory
-/// as it descends into transitive `build` calls, plus a boxed source error.
-/// The chain is empty for errors that did not originate inside a `build`
-/// call (for example, [`BuildError::factory_dropped`]).
+/// Carries a chain of `while building <frame>` [`Frame`]s pushed by the
+/// factory as it descends into transitive `build` calls, plus a boxed
+/// source error. The chain is empty for errors that did not originate
+/// inside a `build` call (for example, [`BuildError::factory_dropped`]).
 ///
 /// `BuildError` deliberately does not implement [`std::error::Error`]: doing
 /// so would conflict with the blanket `From<E: Error + Send + Sync +
@@ -14,7 +52,7 @@ use std::fmt;
 /// [`BuildError::source`] to obtain a `&dyn Error` view of the underlying
 /// cause if you need one.
 pub struct BuildError {
-    chain: Vec<&'static str>,
+    chain: Vec<Frame>,
     source: Box<dyn Error + Send + Sync + 'static>,
 }
 
@@ -28,10 +66,10 @@ impl BuildError {
         }
     }
 
-    /// The chain of resource type names recorded as the error propagated
-    /// up the build stack. The first element is the innermost (originating)
-    /// resource; the last is the outermost.
-    pub fn chain(&self) -> &[&'static str] {
+    /// The frames recorded as the error propagated up the build stack.
+    /// The first element is the innermost (originating) resource; the
+    /// last is the outermost.
+    pub fn chain(&self) -> &[Frame] {
         &self.chain
     }
 
@@ -40,7 +78,7 @@ impl BuildError {
         &*self.source
     }
 
-    pub(crate) fn push_frame(mut self, frame: &'static str) -> Self {
+    pub(crate) fn push_frame(mut self, frame: Frame) -> Self {
         self.chain.push(frame);
         self
     }
@@ -92,18 +130,18 @@ impl Error for FactoryDropped {}
 /// can recognise it via `err.source().downcast_ref::<CycleError>()`.
 #[derive(Debug)]
 pub struct CycleError {
-    path: Vec<&'static str>,
+    path: Vec<Frame>,
 }
 
 impl CycleError {
-    pub(crate) fn new(path: Vec<&'static str>) -> Self {
+    pub(crate) fn new(path: Vec<Frame>) -> Self {
         Self { path }
     }
 
-    /// The resource type names along the detected cycle, starting at the
-    /// resource where the cycle begins and ending with the same resource
-    /// where the cycle closes.
-    pub fn path(&self) -> &[&'static str] {
+    /// The frames along the detected cycle, starting at the resource
+    /// where the cycle begins and ending with the same resource where
+    /// the cycle closes.
+    pub fn path(&self) -> &[Frame] {
         &self.path
     }
 }
@@ -111,11 +149,11 @@ impl CycleError {
 impl fmt::Display for CycleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("dependency cycle detected: ")?;
-        for (i, name) in self.path.iter().enumerate() {
+        for (i, frame) in self.path.iter().enumerate() {
             if i > 0 {
                 f.write_str(" -> ")?;
             }
-            f.write_str(name)?;
+            write!(f, "{frame}")?;
         }
         Ok(())
     }

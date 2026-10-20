@@ -29,8 +29,9 @@ fn singleton_self_cycle_is_detected() {
     let err = factory.get_or_build::<Selfish>().unwrap_err();
     let cycle = cycle_of(&err);
     assert_eq!(cycle.path().len(), 2);
-    assert!(cycle.path()[0].ends_with("Selfish"));
-    assert!(cycle.path()[1].ends_with("Selfish"));
+    assert!(cycle.path()[0].type_name().ends_with("Selfish"));
+    assert!(cycle.path()[1].type_name().ends_with("Selfish"));
+    assert!(cycle.path().iter().all(|frame| frame.key().is_none()));
 }
 
 // --- Two-step singleton cycle: A -> B -> A ---------------------------------
@@ -70,9 +71,9 @@ fn two_step_singleton_cycle_is_detected() {
     let cycle = cycle_of(&err);
     let path = cycle.path();
     assert_eq!(path.len(), 3);
-    assert!(path[0].ends_with("Alpha"));
-    assert!(path[1].ends_with("Beta"));
-    assert!(path[2].ends_with("Alpha"));
+    assert!(path[0].type_name().ends_with("Alpha"));
+    assert!(path[1].type_name().ends_with("Beta"));
+    assert!(path[2].type_name().ends_with("Alpha"));
     let rendered = format!("{err}");
     assert!(rendered.contains("dependency cycle detected"));
 }
@@ -82,7 +83,7 @@ fn two_step_singleton_cycle_is_detected() {
 #[derive(Debug)]
 struct Tree;
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 struct TreeKey(u32);
 
 impl Key for TreeKey {
@@ -108,7 +109,16 @@ impl Query for TreeKey {
 fn query_cycle_on_different_keys_is_detected() {
     let factory = DependencyFactory::new();
     let err = factory.get_or_build_for(TreeKey(1)).unwrap_err();
-    assert_eq!(cycle_of(&err).path().len(), 3);
+    let keys: Vec<Option<&str>> = cycle_of(&err).path().iter().map(|f| f.key()).collect();
+    assert_eq!(
+        keys,
+        [Some("TreeKey(1)"), Some("TreeKey(2)"), Some("TreeKey(1)")]
+    );
+    let rendered = format!("{err}");
+    assert!(
+        rendered.contains("Tree for TreeKey(1) -> build_cycles::Tree for TreeKey(2) -> "),
+        "{rendered}"
+    );
 }
 
 // --- Keys that hash alike but differ: Tenant(1, 0) -> Tenant(1, 1) --------
@@ -178,7 +188,7 @@ fn a_key_that_hashes_like_others_still_detects_its_own_cycle() {
 
 // --- Query self-cycle on the same key --------------------------------------
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 struct SelfishKey;
 
 impl Key for SelfishKey {
@@ -204,7 +214,7 @@ fn query_self_cycle_is_detected() {
 #[derive(Debug)]
 struct Linear;
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 struct LinearKey(u32);
 
 impl Key for LinearKey {
@@ -240,7 +250,7 @@ impl Singleton for Hub {
     }
 }
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct SpokeKey(&'static str);
 
 #[derive(Debug)]

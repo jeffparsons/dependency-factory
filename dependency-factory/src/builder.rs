@@ -3,19 +3,22 @@ use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
-use crate::error::{BuildError, CycleError};
+use crate::error::{BuildError, CycleError, Frame};
 use crate::factory::{DependencyFactoryHandle, Query, Singleton};
 use crate::registry::{Key, Registry, SingletonKey, Transaction};
 
-/// A key held type-erased, so that frames compare with `Eq`. Comparing
+/// A key held type-erased, so that crumbs compare with `Eq`. Comparing
 /// hashes would not do: unequal keys may hash alike, and the breadcrumb
 /// has no bucket to fall back on the way a `HashMap` does.
 trait ErasedKey: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn eq_erased(&self, other: &dyn ErasedKey) -> bool;
+    /// The key as an error should show it, or `None` for a singleton,
+    /// whose key says nothing the value type does not.
+    fn describe(&self) -> Option<String>;
 }
 
-impl<K: Key> ErasedKey for K {
+impl<Q: Query> ErasedKey for Q {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -23,8 +26,26 @@ impl<K: Key> ErasedKey for K {
     fn eq_erased(&self, other: &dyn ErasedKey) -> bool {
         other
             .as_any()
-            .downcast_ref::<K>()
+            .downcast_ref::<Q>()
             .is_some_and(|other| self == other)
+    }
+
+    fn describe(&self) -> Option<String> {
+        Some(format!("{self:?}"))
+    }
+}
+
+impl<R: Send + Sync + 'static> ErasedKey for SingletonKey<R> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn eq_erased(&self, other: &dyn ErasedKey) -> bool {
+        other.as_any().is::<Self>()
+    }
+
+    fn describe(&self) -> Option<String> {
+        None
     }
 }
 
@@ -32,17 +53,22 @@ impl<K: Key> ErasedKey for K {
 /// the key itself so different keys of the same key type are
 /// distinguished, however they hash.
 #[derive(Clone)]
-struct Frame {
+struct Crumb {
     key: Arc<dyn ErasedKey>,
     type_name: &'static str,
 }
 
-impl Frame {
-    fn new<K: Key>(key: &K) -> Self {
+impl Crumb {
+    fn new<K: Key + ErasedKey>(key: &K) -> Self {
         Self {
             key: Arc::new(key.clone()),
             type_name: type_name::<K::Value>(),
         }
+    }
+
+    /// This crumb as an error reports it.
+    fn frame(&self) -> Frame {
+        Frame::new(self.type_name, self.key.describe())
     }
 }
 
@@ -76,7 +102,7 @@ pub struct Builder<'a> {
     registry: &'a Arc<Registry>,
     /// Keys whose `build` is on this builder's call stack, outermost
     /// first.
-    breadcrumb: Vec<Frame>,
+    breadcrumb: Vec<Crumb>,
 }
 
 impl<'a> Builder<'a> {
@@ -126,10 +152,10 @@ impl<'a> Builder<'a> {
         if let Some(arc) = self.get::<R>() {
             return Ok(arc);
         }
-        let frame = Frame::new(&SingletonKey::<R>::new());
-        let value = self.with_frame(frame.clone(), R::build)?;
+        let crumb = Crumb::new(&SingletonKey::<R>::new());
+        let value = self.with_frame(crumb.clone(), R::build)?;
         let arc = self.transaction.get_or_insert_with(|| value);
-        self.with_frame(frame, |builder| R::register(&arc, builder))?;
+        self.with_frame(crumb, |builder| R::register(&arc, builder))?;
         Ok(arc)
     }
 
@@ -140,12 +166,12 @@ impl<'a> Builder<'a> {
         if let Some(arc) = self.get_for(&query) {
             return Ok(arc);
         }
-        let frame = Frame::new(&query);
-        let value = self.with_frame(frame.clone(), |builder| query.build(builder))?;
+        let crumb = Crumb::new(&query);
+        let value = self.with_frame(crumb.clone(), |builder| query.build(builder))?;
         let arc = self
             .transaction
             .get_or_insert_with_for(query.clone(), || value);
-        self.with_frame(frame, |builder| query.register(&arc, builder))?;
+        self.with_frame(crumb, |builder| query.register(&arc, builder))?;
         Ok(arc)
     }
 
@@ -162,34 +188,30 @@ impl<'a> Builder<'a> {
         self.transaction.indexed::<T>()
     }
 
-    /// Run a user `build` or `register` for `frame` with the breadcrumb
+    /// Run a user `build` or `register` for `crumb` with the breadcrumb
     /// maintained around it: a cycle is reported before the call starts,
-    /// an error is attributed to the frame, and the frame is popped again
-    /// whether the call returns or unwinds.
+    /// an error is attributed to the crumb's frame, and the crumb is
+    /// popped again whether the call returns or unwinds.
     fn with_frame<T>(
         &mut self,
-        frame: Frame,
+        crumb: Crumb,
         build: impl FnOnce(&mut Self) -> Result<T, BuildError>,
     ) -> Result<T, BuildError> {
         if let Some(start) = self
             .breadcrumb
             .iter()
-            .position(|f| f.key.eq_erased(&*frame.key))
+            .position(|c| c.key.eq_erased(&*crumb.key))
         {
-            let mut path: Vec<&'static str> = self.breadcrumb[start..]
-                .iter()
-                .map(|f| f.type_name)
-                .collect();
-            path.push(frame.type_name);
+            let mut path: Vec<Frame> = self.breadcrumb[start..].iter().map(Crumb::frame).collect();
+            path.push(crumb.frame());
             return Err(CycleError::new(path).into());
         }
         let depth = self.breadcrumb.len();
-        let frame_name = frame.type_name;
-        self.breadcrumb.push(frame);
+        self.breadcrumb.push(crumb.clone());
         let result = catch_unwind(AssertUnwindSafe(|| build(self)));
         self.breadcrumb.truncate(depth);
         match result {
-            Ok(result) => result.map_err(|e| e.push_frame(frame_name)),
+            Ok(result) => result.map_err(|e| e.push_frame(crumb.frame())),
             Err(payload) => resume_unwind(payload),
         }
     }
@@ -203,7 +225,7 @@ impl fmt::Debug for Builder<'_> {
                 &self
                     .breadcrumb
                     .iter()
-                    .map(|frame| frame.type_name)
+                    .map(|crumb| crumb.frame().to_string())
                     .collect::<Vec<_>>(),
             )
             .finish_non_exhaustive()

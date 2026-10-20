@@ -5,7 +5,7 @@ mod registry;
 mod store;
 
 pub use builder::Builder;
-pub use error::{BuildError, CycleError, OccupiedError};
+pub use error::{BuildError, CycleError, Frame, OccupiedError};
 pub use factory::{DependencyFactory, DependencyFactoryHandle, Query, Singleton};
 pub use registry::{Key, Registry, Transaction};
 
@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(*h2.get::<u32>().unwrap().unwrap(), 1);
     }
 
-    #[derive(Hash, Eq, PartialEq, Clone)]
+    #[derive(Debug, Hash, Eq, PartialEq, Clone)]
     struct StringKey(u32);
 
     impl Key for StringKey {
