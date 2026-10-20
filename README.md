@@ -17,7 +17,9 @@ Two kinds of resources are supported:
   value. Implement `Key` to pair a key type with its value type, and
   `Query` on top of it to say how the value is built from the key.
 
-Cycles in the dependency graph are detected at runtime and surfaced as
+An error names every resource that was being built when it happened,
+and a keyed resource by its key, through the key's `Debug` impl. Cycles
+in the dependency graph are detected at runtime and surfaced as
 structured errors with the full path through the cycle.
 
 Resources live in a `Registry`, a thread-safe type-keyed map that knows

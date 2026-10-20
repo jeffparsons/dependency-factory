@@ -8,7 +8,7 @@ struct Db {
     name: String,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct DbKey(&'static str);
 
 impl Key for DbKey {
@@ -30,7 +30,7 @@ struct Service {
     label: &'static str,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct ServiceKey(&'static str);
 
 impl Key for ServiceKey {
@@ -105,7 +105,7 @@ impl std::error::Error for Upstream {}
 #[derive(Debug)]
 struct Failing;
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct FailingKey;
 
 impl Key for FailingKey {
@@ -124,7 +124,7 @@ struct DependsOnFailing {
     f: Arc<Failing>,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct DependsOnFailingKey;
 
 impl Key for DependsOnFailingKey {
@@ -146,19 +146,52 @@ fn errors_carry_chain_of_output_type_names() {
     let chain = err.chain();
     assert_eq!(chain.len(), 2);
     assert!(
-        chain[0].ends_with("Failing"),
+        chain[0].type_name().ends_with("Failing"),
         "innermost frame: {}",
         chain[0]
     );
     assert!(
-        chain[1].ends_with("DependsOnFailing"),
+        chain[1].type_name().ends_with("DependsOnFailing"),
         "outermost frame: {}",
         chain[1],
     );
+    assert_eq!(chain[0].key(), Some("FailingKey"));
+    assert_eq!(chain[1].key(), Some("DependsOnFailingKey"));
     let rendered = format!("{err}");
-    assert!(rendered.contains("DependsOnFailing"));
-    assert!(rendered.contains("Failing"));
+    assert!(rendered.contains("DependsOnFailing for DependsOnFailingKey"));
+    assert!(rendered.contains("Failing for FailingKey"));
     assert!(rendered.contains("upstream is unavailable"));
+}
+
+// A key carrying data is shown through its `Debug` impl.
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+struct RegionKey(&'static str);
+
+impl Key for RegionKey {
+    type Value = Failing;
+}
+
+impl Query for RegionKey {
+    fn build(&self, _builder: &mut Builder) -> Result<Failing, BuildError> {
+        Err(Upstream.into())
+    }
+}
+
+#[test]
+fn errors_name_the_key_a_value_was_built_for() {
+    let factory = DependencyFactory::new();
+    let err = factory.get_or_build_for(RegionKey("north")).unwrap_err();
+    let frame = &err.chain()[0];
+    assert_eq!(frame.key(), Some(r#"RegionKey("north")"#));
+    assert_eq!(
+        frame.to_string(),
+        format!(r#"{} for RegionKey("north")"#, frame.type_name())
+    );
+    let rendered = format!("{err}");
+    assert!(
+        rendered.contains(r#"while building build_queries::Failing for RegionKey("north")"#),
+        "{rendered}"
+    );
 }
 
 struct Clock;
@@ -174,7 +207,7 @@ struct TimedDb {
     name: String,
 }
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct TimedDbKey(&'static str);
 
 impl Key for TimedDbKey {

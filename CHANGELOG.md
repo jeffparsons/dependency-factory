@@ -14,8 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Singleton` trait: one-instance-per-type resources, recursively buildable.
 - `Query` trait: keyed resources where the key value parameterises the build.
 - Cycle detection across `Singleton` and `Query` resolution, with
-  `BuildError` chains that name each frame and surface a `CycleError`
-  for downcasting when a cycle is detected.
+  `BuildError` chains of `Frame`s that name each value type and, for a
+  keyed resource, its key, and surface a `CycleError` for downcasting
+  when a cycle is detected.
 - `#[derive(Singleton)]` proc macro with a `#[factory(query = key_fn)]`
   field attribute for opting individual fields into `Query`-keyed resolution.
 - Indexes: `Transaction::index::<T>(arc)` adds an `Arc<T>` (usually a

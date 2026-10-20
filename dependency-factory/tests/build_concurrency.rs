@@ -85,7 +85,7 @@ fn concurrent_requests_for_one_key_build_it_once() {
 static IN_BUILD: AtomicBool = AtomicBool::new(false);
 static OVERLAPPED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct ExclusiveKey(u8);
 
 impl Key for ExclusiveKey {

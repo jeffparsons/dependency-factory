@@ -114,17 +114,20 @@ fn errors_carry_a_chain_of_frames() {
     let chain = err.chain();
     assert_eq!(chain.len(), 2);
     assert!(
-        chain[0].ends_with("Failing"),
+        chain[0].type_name().ends_with("Failing"),
         "innermost frame: {}",
         chain[0]
     );
     assert!(
-        chain[1].ends_with("DependsOnFailing"),
+        chain[1].type_name().ends_with("DependsOnFailing"),
         "outermost frame: {}",
         chain[1],
     );
+    // A singleton has no key to show.
+    assert!(chain.iter().all(|frame| frame.key().is_none()));
     let rendered = format!("{err}");
     assert!(rendered.contains("DependsOnFailing"));
     assert!(rendered.contains("Failing"));
     assert!(rendered.contains("upstream is unavailable"));
+    assert!(!rendered.contains(" for "), "{rendered}");
 }

@@ -74,9 +74,13 @@ fn derive_propagates_error_with_frame() {
     let err = factory.get_or_build::<DependsOnFailing>().unwrap_err();
     let chain = err.chain();
     assert_eq!(chain.len(), 2, "chain: {chain:?}");
-    assert!(chain[0].ends_with("Failing"), "innermost: {}", chain[0]);
     assert!(
-        chain[1].ends_with("DependsOnFailing"),
+        chain[0].type_name().ends_with("Failing"),
+        "innermost: {}",
+        chain[0]
+    );
+    assert!(
+        chain[1].type_name().ends_with("DependsOnFailing"),
         "outermost: {}",
         chain[1],
     );
@@ -86,7 +90,7 @@ fn derive_propagates_error_with_frame() {
     assert!(rendered.contains("upstream is unavailable"));
 }
 
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct DbKey(&'static str);
 
 impl Key for DbKey {
