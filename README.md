@@ -47,6 +47,22 @@ and reported. `get_or_build` takes a builder for the duration of the
 call; `factory.builder()` hands one out to hold across several. Lookups
 that never build (`get`, `get_for`) take no builder and never wait.
 
+Resources that take part in a lifecycle event the application runs, such
+as warming up or shutting down, make themselves findable through an
+*index*: the registry's list of `Arc<dyn Trait>` for any trait you like.
+A resource adds itself in `Singleton::register` (or `Query::register`),
+a hook that runs right after the built value is cached, with the
+builder still open. That is where `Arc<Resource>` becomes
+`Arc<dyn Trait>`, so the registry never needs to know which traits a
+value implements. `#[derive(Singleton)]` writes the hook from a
+`#[factory(index(dyn Trait, ...))]` attribute. Whoever runs the event
+asks for `registry.indexed::<dyn Trait>()`. The index is published in
+the same batch as the value, a resource always follows its dependencies
+in it, and a replaced value leaves its indexes. A value inserted by hand
+is not indexed unless the caller adds it with `Transaction::index`. The
+crate holds no graph between resources and runs no hooks itself; what a
+lifecycle event is, and when it runs, is the application's business.
+
 ## Usage
 
 ```toml
@@ -88,6 +104,51 @@ let factory = DependencyFactory::new();
 factory.registry().begin().insert(Config { greeting: "g'day".into() }).unwrap();
 let greeter: Arc<Greeter> = factory.get_or_build().unwrap();
 assert_eq!(greeter.config.greeting, "g'day");
+```
+
+A lifecycle event, run by the application over an index:
+
+```rust
+use std::sync::Arc;
+use dependency_factory::{BuildError, Builder, DependencyFactory, Singleton};
+
+trait WarmUp: Send + Sync {
+    fn warm_up(&self);
+}
+
+struct Cache;
+
+impl WarmUp for Cache {
+    fn warm_up(&self) { /* fill the cache */ }
+}
+
+impl Singleton for Cache {
+    fn build(_: &mut Builder) -> Result<Self, BuildError> {
+        Ok(Cache)
+    }
+
+    fn register(this: &Arc<Self>, builder: &mut Builder) -> Result<(), BuildError> {
+        builder.index::<dyn WarmUp>(this.clone());
+        Ok(())
+    }
+}
+
+#[derive(Singleton)]
+#[factory(index(dyn WarmUp))]
+struct Service {
+    cache: Arc<Cache>,
+}
+
+impl WarmUp for Service {
+    fn warm_up(&self) { /* prime the service */ }
+}
+
+let factory = DependencyFactory::new();
+factory.get_or_build::<Service>().unwrap();
+// Dependencies first: Cache, then Service.
+for resource in factory.indexed::<dyn WarmUp>() {
+    resource.warm_up();
+}
 ```
 
 ## License

@@ -112,29 +112,53 @@ impl<'a> Builder<'a> {
     }
 
     /// Return the singleton instance of `R`, building it via `R::build`
-    /// if it is not already cached.
+    /// and then running [`R::register`](Singleton::register) if it is not
+    /// already cached.
     pub fn get_or_build<R: Singleton>(&mut self) -> Result<Arc<R>, BuildError> {
         if let Some(arc) = self.get::<R>() {
             return Ok(arc);
         }
-        let value = self.run_build(Frame::singleton::<R>(), R::build)?;
-        Ok(self.transaction.get_or_insert_with(|| value))
+        let frame = Frame::singleton::<R>();
+        let value = self.with_frame(frame, R::build)?;
+        let arc = self.transaction.get_or_insert_with(|| value);
+        self.with_frame(frame, |builder| R::register(&arc, builder))?;
+        Ok(arc)
     }
 
-    /// Return the value for `query`, building it via `Q::build` if it is
-    /// not already cached.
+    /// Return the value for `query`, building it via `Q::build` and then
+    /// running [`Q::register`](Query::register) if it is not already
+    /// cached.
     pub fn get_or_build_for<Q: Query>(&mut self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
         if let Some(arc) = self.get_for(&query) {
             return Ok(arc);
         }
-        let value = self.run_build(Frame::query(&query), |builder| query.build(builder))?;
-        Ok(self.transaction.get_or_insert_with_for(query, || value))
+        let frame = Frame::query(&query);
+        let value = self.with_frame(frame, |builder| query.build(builder))?;
+        let arc = self
+            .transaction
+            .get_or_insert_with_for(query.clone(), || value);
+        self.with_frame(frame, |builder| query.register(&arc, builder))?;
+        Ok(arc)
     }
 
-    /// Run a user `build` for `frame` with the breadcrumb maintained around
-    /// it: a cycle is reported before the build starts, and the frame is
-    /// popped again whether the build returns or unwinds.
-    fn run_build<T>(
+    /// Add `item` to the end of the index for `T`, as
+    /// [`Transaction::index`] does. What `register` hooks call.
+    pub fn index<T: ?Sized + Send + Sync + 'static>(&mut self, item: Arc<T>) {
+        self.transaction.index(item);
+    }
+
+    /// Return everything in the index for `T`, in the order it was added,
+    /// including what this builder has added and not yet published. The
+    /// list is a snapshot: later additions are not in it.
+    pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Vec<Arc<T>> {
+        self.transaction.indexed::<T>()
+    }
+
+    /// Run a user `build` or `register` for `frame` with the breadcrumb
+    /// maintained around it: a cycle is reported before the call starts,
+    /// an error is attributed to the frame, and the frame is popped again
+    /// whether the call returns or unwinds.
+    fn with_frame<T>(
         &mut self,
         frame: Frame,
         build: impl FnOnce(&mut Self) -> Result<T, BuildError>,

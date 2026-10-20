@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -6,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread;
 
 use crate::error::OccupiedError;
-use crate::store::Store;
+use crate::store::{Store, data_ptr};
 
 /// A key that identifies one resource in a [`Registry`]. The key type fixes
 /// the value type, so a lookup by key can never see a value of the wrong
@@ -63,6 +64,15 @@ impl<R: Send + Sync + 'static> Key for SingletonKey<R> {
 /// type alone (`insert`, `get`, ...), and keyed resources, identified by a
 /// [`Key`] value (`insert_for`, `get_for`, ...).
 ///
+/// Alongside its entries a registry keeps *indexes*: for any `T`, usually
+/// a trait object such as `dyn WarmUp`, the list of `Arc<T>` that have
+/// been added to the index for `T` by [`Transaction::index`], in the
+/// order they were added. An index is how code that handles a lifecycle
+/// event finds every resource that takes part in it without knowing their
+/// concrete types; see [`indexed`](Self::indexed). Indexes are not
+/// registered ahead of time: the index for `T` exists once something is
+/// added to it.
+///
 /// Reads live here and never wait for a [`Transaction`], not even for a
 /// build in progress: they look at the front buffer, which a transaction
 /// touches only for the moment it takes to publish. Writes live on the
@@ -118,6 +128,25 @@ impl Registry {
             .unwrap_or_else(PoisonError::into_inner)
             .get(key)
     }
+
+    /// Return everything in the index for `T`, in the order it was added.
+    /// Empty if nothing has been added to it. The list is a snapshot:
+    /// additions published after this call are not in it.
+    ///
+    /// Resources the factory builds are added to their indexes by their
+    /// [`Singleton::register`](crate::Singleton::register) or
+    /// [`Query::register`](crate::Query::register) after their
+    /// dependencies have been built and registered, so a resource always
+    /// follows its dependencies in an index: iterate forwards to start
+    /// things up, backwards to shut them down.
+    pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Vec<Arc<T>> {
+        self.front
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .indexed::<T>()
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 impl fmt::Debug for Registry {
@@ -142,7 +171,16 @@ impl fmt::Debug for Registry {
 /// Writes come in three flavours. `insert` fills an empty slot and refuses
 /// an occupied one; `get_or_insert_with` fills an empty slot and otherwise
 /// returns what is there; `replace` overwrites. Replacing does not affect
-/// anyone already holding the previous `Arc`.
+/// anyone already holding the previous `Arc`, but it does take the
+/// previous `Arc` out of every index it was in.
+///
+/// A fourth write, [`index`](Self::index), adds an `Arc` to the index for
+/// some `T`, which is the only way an index grows. Inserting a value by
+/// hand does not index it, since the registry cannot tell which traits a
+/// value implements; add it to its indexes next to the insert. Resources
+/// the factory builds index themselves through
+/// [`Singleton::register`](crate::Singleton::register) and
+/// [`Query::register`](crate::Query::register).
 pub struct Transaction<'a> {
     /// The registry's back buffer, held for the life of the transaction.
     back: MutexGuard<'a, Store>,
@@ -206,11 +244,70 @@ impl Transaction<'_> {
     }
 
     /// Store `value` under `key`, overwriting any resource already there.
-    /// Returns the new `Arc`.
+    /// Returns the new `Arc`. The previous `Arc`, if any, is removed from
+    /// every index it was in; the new one is not indexed.
     pub fn replace_for<K: Key>(&mut self, key: K, value: K::Value) -> Arc<K::Value> {
+        if let Some(previous) = self.get_for(&key) {
+            self.unindex(data_ptr(&previous));
+        }
         let arc = Arc::new(value);
         self.overlay.insert(key, Arc::clone(&arc));
         arc
+    }
+
+    /// Add `item` to the end of the index for `T`. `T` is usually a trait
+    /// object, so that `Arc<Resource>` coerces to `Arc<dyn Trait>` at the
+    /// call site, where the compiler can see the `impl`:
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use dependency_factory::Registry;
+    /// # trait WarmUp: Send + Sync { fn warm_up(&self); }
+    /// # struct Cache;
+    /// # impl WarmUp for Cache { fn warm_up(&self) {} }
+    /// let registry = Registry::new();
+    /// let mut tx = registry.begin();
+    /// let cache = tx.insert(Cache).unwrap();
+    /// tx.index::<dyn WarmUp>(cache);
+    /// tx.commit();
+    /// for resource in registry.indexed::<dyn WarmUp>() {
+    ///     resource.warm_up();
+    /// }
+    /// ```
+    ///
+    /// Nothing checks that `item` is a registry value; any `Arc` can be
+    /// indexed. One that is a registry value leaves the index again when
+    /// the value is replaced.
+    pub fn index<T: ?Sized + Send + Sync + 'static>(&mut self, item: Arc<T>) {
+        self.overlay.adopt_index(TypeId::of::<T>(), &self.back);
+        self.overlay.index(item);
+    }
+
+    /// Return everything in the index for `T`, in the order it was added,
+    /// including what this transaction has added and not yet published.
+    /// Empty if nothing has been added to it. The list is a snapshot:
+    /// later additions are not in it.
+    pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Vec<Arc<T>> {
+        self.overlay
+            .indexed::<T>()
+            .or_else(|| self.back.indexed::<T>())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Remove every `Arc` to `ptr` from every index, bringing each index
+    /// that held one into the overlay first so the removal is part of this
+    /// transaction's batch.
+    fn unindex(&mut self, ptr: *const ()) {
+        let in_back: Vec<TypeId> = self
+            .back
+            .index_ids()
+            .filter(|&id| self.back.index_contains(id, ptr))
+            .collect();
+        for id in in_back {
+            self.overlay.adopt_index(id, &self.back);
+        }
+        self.overlay.unindex(ptr);
     }
 
     /// Return the resource stored under `key`, storing the result of `make`
@@ -534,6 +631,177 @@ mod tests {
         assert_eq!(*registry.get::<u32>().unwrap(), 2);
         assert_eq!(*registry.get::<u64>().unwrap(), 2);
     }
+    // --- Indexes -------------------------------------------------------------
+
+    trait Named: Send + Sync {
+        fn name(&self) -> &str;
+    }
+
+    impl Named for String {
+        fn name(&self) -> &str {
+            self
+        }
+    }
+
+    fn names(index: Vec<Arc<dyn Named>>) -> Vec<String> {
+        index.iter().map(|n| n.name().to_string()).collect()
+    }
+
+    #[test]
+    fn indexed_is_empty_until_something_is_added() {
+        let registry = Registry::new();
+        assert!(registry.indexed::<dyn Named>().is_empty());
+        assert!(registry.begin().indexed::<dyn Named>().is_empty());
+    }
+
+    #[test]
+    fn index_keeps_insertion_order_across_transactions() {
+        let registry = Registry::new();
+        let one = registry.begin().insert("one".to_string()).unwrap();
+        registry
+            .begin()
+            .index::<dyn Named>(Arc::clone(&one) as Arc<dyn Named>);
+        {
+            let mut tx = registry.begin();
+            tx.index::<dyn Named>(Arc::new("two".to_string()));
+            tx.index::<dyn Named>(Arc::new("three".to_string()));
+        }
+        assert_eq!(
+            names(registry.indexed::<dyn Named>()),
+            ["one", "two", "three"]
+        );
+        let first = &registry.indexed::<dyn Named>()[0];
+        assert_eq!(data_ptr(first), data_ptr(&one));
+    }
+
+    #[test]
+    fn an_index_addition_is_published_with_the_batch() {
+        let registry = Registry::new();
+        registry
+            .begin()
+            .index::<dyn Named>(Arc::new("one".to_string()));
+        let mut tx = registry.begin();
+        tx.index::<dyn Named>(Arc::new("two".to_string()));
+        assert_eq!(names(tx.indexed::<dyn Named>()), ["one", "two"]);
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
+        drop(tx);
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["one", "two"]);
+    }
+
+    #[test]
+    fn discard_and_panic_drop_index_additions() {
+        let registry = Registry::new();
+        registry
+            .begin()
+            .index::<dyn Named>(Arc::new("one".to_string()));
+
+        let mut tx = registry.begin();
+        tx.index::<dyn Named>(Arc::new("two".to_string()));
+        tx.discard();
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut tx = registry.begin();
+            tx.index::<dyn Named>(Arc::new("two".to_string()));
+            panic!("inside the transaction");
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
+    }
+
+    #[test]
+    fn replace_removes_the_previous_value_from_every_index() {
+        let registry = Registry::new();
+        let old = {
+            let mut tx = registry.begin();
+            let old = tx.insert("old".to_string()).unwrap();
+            tx.index::<dyn Named>(Arc::new("before".to_string()));
+            tx.index::<dyn Named>(Arc::clone(&old) as Arc<dyn Named>);
+            tx.index::<dyn Named>(Arc::new("after".to_string()));
+            tx.index::<String>(Arc::clone(&old));
+            // An index the old value is not in.
+            tx.index::<u32>(Arc::new(1));
+            old
+        };
+        assert_eq!(
+            names(registry.indexed::<dyn Named>()),
+            ["before", "old", "after"]
+        );
+
+        // The removal is staged with the batch, like any other write.
+        let mut tx = registry.begin();
+        let new = tx.replace("new".to_string());
+        assert_eq!(names(tx.indexed::<dyn Named>()), ["before", "after"]);
+        assert!(tx.indexed::<String>().is_empty());
+        assert_eq!(
+            names(registry.indexed::<dyn Named>()),
+            ["before", "old", "after"]
+        );
+        drop(tx);
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["before", "after"]);
+        assert!(registry.indexed::<String>().is_empty());
+        assert_eq!(registry.indexed::<u32>().len(), 1);
+        // The old Arc is unaffected for anyone still holding it, and the
+        // new value is not indexed.
+        assert_eq!(*old, "old");
+        assert!(Arc::ptr_eq(&new, &registry.get::<String>().unwrap()));
+    }
+
+    #[test]
+    fn replace_within_one_transaction_unindexes_too() {
+        let registry = Registry::new();
+        let mut tx = registry.begin();
+        let old = tx.insert("old".to_string()).unwrap();
+        tx.index::<dyn Named>(Arc::clone(&old) as Arc<dyn Named>);
+        tx.replace("new".to_string());
+        assert!(tx.indexed::<dyn Named>().is_empty());
+        drop(tx);
+        assert!(registry.indexed::<dyn Named>().is_empty());
+    }
+
+    #[test]
+    fn replacing_an_unindexed_value_leaves_indexes_alone() {
+        let registry = Registry::new();
+        registry.begin().insert(1_u32).unwrap();
+        registry
+            .begin()
+            .index::<dyn Named>(Arc::new("one".to_string()));
+        registry.begin().replace(2_u32);
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
+    }
+
+    #[test]
+    fn the_buffers_agree_on_indexes_between_transactions() {
+        let registry = Registry::new();
+
+        fn assert_buffers_agree(registry: &Registry) {
+            let front = registry.front.read().unwrap();
+            let back = registry.back.lock().unwrap();
+            let f = front.indexed::<dyn Named>().cloned().unwrap_or_default();
+            let b = back.indexed::<dyn Named>().cloned().unwrap_or_default();
+            assert_eq!(f.len(), b.len());
+            for (f, b) in f.iter().zip(&b) {
+                assert_eq!(data_ptr(f), data_ptr(b));
+            }
+        }
+
+        assert_buffers_agree(&registry);
+        registry
+            .begin()
+            .index::<dyn Named>(Arc::new("one".to_string()));
+        assert_buffers_agree(&registry);
+        {
+            let mut tx = registry.begin();
+            let two = tx.insert("two".to_string()).unwrap();
+            tx.index::<dyn Named>(Arc::clone(&two) as Arc<dyn Named>);
+            tx.index::<dyn Named>(Arc::new("three".to_string()));
+        }
+        assert_buffers_agree(&registry);
+        registry.begin().replace("deux".to_string());
+        assert_buffers_agree(&registry);
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["one", "three"]);
+    }
+
     // --- The overlay and the two buffers -------------------------------------
 
     #[test]

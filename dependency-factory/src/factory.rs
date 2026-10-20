@@ -89,6 +89,12 @@ impl DependencyFactory {
     pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
         self.handle().get_or_build_for(query)
     }
+
+    /// Return everything in the index for `T`, in the order it was added;
+    /// see [`Registry::indexed`]. Never waits for a builder.
+    pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Vec<Arc<T>> {
+        self.registry.indexed::<T>()
+    }
 }
 
 impl Default for DependencyFactory {
@@ -161,6 +167,13 @@ impl DependencyFactoryHandle {
         }
         Builder::new(&registry).get_or_build_for(query)
     }
+
+    /// Return everything in the index for `T`, in the order it was added;
+    /// see [`Registry::indexed`]. `Err(_)` means the registry itself has
+    /// been dropped. Never waits for a builder.
+    pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Result<Vec<Arc<T>>, BuildError> {
+        Ok(self.upgrade()?.indexed::<T>())
+    }
 }
 
 /// A resource identified solely by its type. At most one instance per type
@@ -169,12 +182,55 @@ impl DependencyFactoryHandle {
 /// dependencies.
 ///
 /// `build` must be cheap and side-effect-free: no I/O, no blocking, no
-/// contended locking. Expensive setup belongs in async lifecycle hooks
-/// (added later) or in the resource's own methods, not here. A resource
-/// that needs to look things up after assembly can store
-/// [`Builder::handle`].
+/// contended locking. Expensive setup belongs in the resource's own
+/// methods, which the application calls when it is ready to; a resource
+/// that should take part in a lifecycle event the application runs, such
+/// as warming up or shutting down, makes itself findable by adding itself
+/// to an index in [`register`](Self::register). A resource that needs to
+/// look things up after assembly can store [`Builder::handle`].
 pub trait Singleton: Send + Sync + Sized + 'static {
     fn build(builder: &mut Builder<'_>) -> Result<Self, BuildError>;
+
+    /// Runs once, right after the value `build` returned has been cached
+    /// as `this`, with the builder still open and before `get_or_build`
+    /// returns. It does not run for a value that was already present, or
+    /// for one inserted by hand.
+    ///
+    /// The usual body adds `this` to the indexes the resource belongs to,
+    /// which is where the unsizing from `Arc<Self>` to `Arc<dyn Trait>`
+    /// happens, so a resource can be found later by trait without the
+    /// registry knowing its concrete type:
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use dependency_factory::{BuildError, Builder, Singleton};
+    /// # trait WarmUp: Send + Sync { fn warm_up(&self); }
+    /// # struct Cache;
+    /// # impl WarmUp for Cache { fn warm_up(&self) {} }
+    /// impl Singleton for Cache {
+    ///     fn build(_: &mut Builder<'_>) -> Result<Self, BuildError> {
+    ///         Ok(Cache)
+    ///     }
+    ///
+    ///     fn register(this: &Arc<Self>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
+    ///         builder.index::<dyn WarmUp>(this.clone());
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// `#[derive(Singleton)]` writes this body from a
+    /// `#[factory(index(dyn WarmUp, ...))]` attribute on the struct.
+    ///
+    /// The builder is the same one `build` had, so `register` may resolve
+    /// other resources through it, with the same rules. An error ends the
+    /// `get_or_build` that was in progress, attributed to this type like
+    /// an error from `build`; the value stays cached, as dependencies a
+    /// failed `build` had already built do. The default does nothing.
+    fn register(this: &Arc<Self>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
+        let _ = (this, builder);
+        Ok(())
+    }
 }
 
 /// A keyed resource the factory can build: the implementor is the key
@@ -184,8 +240,29 @@ pub trait Singleton: Send + Sync + Sized + 'static {
 /// value in the registry under that key.
 ///
 /// `build` must be cheap and side-effect-free: no I/O, no blocking, no
-/// contended locking. Expensive setup belongs in async lifecycle hooks
-/// (added later) or in the resource's own methods, not here.
+/// contended locking. Expensive setup belongs in the value's own methods,
+/// which the application calls when it is ready to; a value that should
+/// take part in a lifecycle event adds itself to an index in
+/// [`register`](Self::register).
 pub trait Query: Key {
     fn build(&self, builder: &mut Builder<'_>) -> Result<Self::Value, BuildError>;
+
+    /// Runs once, right after the value `build` returned has been cached
+    /// as `value` under this key, with the builder still open and before
+    /// `get_or_build_for` returns. It does not run for a value that was
+    /// already present, or for one inserted by hand.
+    ///
+    /// The same as [`Singleton::register`], with the key to hand: the
+    /// usual body adds `value` to the indexes it belongs to, as
+    /// `builder.index::<dyn Trait>(value.clone())`. An error ends the
+    /// `get_or_build_for` in progress, attributed to the value type; the
+    /// value stays cached. The default does nothing.
+    fn register(
+        &self,
+        value: &Arc<Self::Value>,
+        builder: &mut Builder<'_>,
+    ) -> Result<(), BuildError> {
+        let _ = (value, builder);
+        Ok(())
+    }
 }
