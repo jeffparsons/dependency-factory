@@ -1,39 +1,47 @@
-use std::any::TypeId;
+use std::any::{Any, type_name};
 use std::fmt;
-use std::hash::{DefaultHasher, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
 use crate::error::{BuildError, CycleError};
 use crate::factory::{DependencyFactoryHandle, Query, Singleton};
-use crate::registry::{Registry, SingletonKey, Transaction};
+use crate::registry::{Key, Registry, SingletonKey, Transaction};
 
-/// One entry on the builder's "currently building" breadcrumb. Carries a
-/// hashed key value so different keys of the same key type are
-/// distinguished.
-#[derive(Clone, Copy)]
+/// A key held type-erased, so that frames compare with `Eq`. Comparing
+/// hashes would not do: unequal keys may hash alike, and the breadcrumb
+/// has no bucket to fall back on the way a `HashMap` does.
+trait ErasedKey: Any + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn eq_erased(&self, other: &dyn ErasedKey) -> bool;
+}
+
+impl<K: Key> ErasedKey for K {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn eq_erased(&self, other: &dyn ErasedKey) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<K>()
+            .is_some_and(|other| self == other)
+    }
+}
+
+/// One entry on the builder's "currently building" breadcrumb. Carries
+/// the key itself so different keys of the same key type are
+/// distinguished, however they hash.
+#[derive(Clone)]
 struct Frame {
-    type_id: TypeId,
-    key_hash: u64,
+    key: Arc<dyn ErasedKey>,
     type_name: &'static str,
 }
 
 impl Frame {
-    fn singleton<R: 'static>() -> Self {
+    fn new<K: Key>(key: &K) -> Self {
         Self {
-            type_id: TypeId::of::<SingletonKey<R>>(),
-            key_hash: 0,
-            type_name: std::any::type_name::<R>(),
-        }
-    }
-
-    fn query<Q: Query>(key: &Q) -> Self {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        Self {
-            type_id: TypeId::of::<Q>(),
-            key_hash: hasher.finish(),
-            type_name: std::any::type_name::<Q::Value>(),
+            key: Arc::new(key.clone()),
+            type_name: type_name::<K::Value>(),
         }
     }
 }
@@ -118,8 +126,8 @@ impl<'a> Builder<'a> {
         if let Some(arc) = self.get::<R>() {
             return Ok(arc);
         }
-        let frame = Frame::singleton::<R>();
-        let value = self.with_frame(frame, R::build)?;
+        let frame = Frame::new(&SingletonKey::<R>::new());
+        let value = self.with_frame(frame.clone(), R::build)?;
         let arc = self.transaction.get_or_insert_with(|| value);
         self.with_frame(frame, |builder| R::register(&arc, builder))?;
         Ok(arc)
@@ -132,8 +140,8 @@ impl<'a> Builder<'a> {
         if let Some(arc) = self.get_for(&query) {
             return Ok(arc);
         }
-        let frame = Frame::query(&query);
-        let value = self.with_frame(frame, |builder| query.build(builder))?;
+        let frame = Frame::new(&query);
+        let value = self.with_frame(frame.clone(), |builder| query.build(builder))?;
         let arc = self
             .transaction
             .get_or_insert_with_for(query.clone(), || value);
@@ -166,7 +174,7 @@ impl<'a> Builder<'a> {
         if let Some(start) = self
             .breadcrumb
             .iter()
-            .position(|f| f.type_id == frame.type_id && f.key_hash == frame.key_hash)
+            .position(|f| f.key.eq_erased(&*frame.key))
         {
             let mut path: Vec<&'static str> = self.breadcrumb[start..]
                 .iter()
@@ -176,11 +184,12 @@ impl<'a> Builder<'a> {
             return Err(CycleError::new(path).into());
         }
         let depth = self.breadcrumb.len();
+        let frame_name = frame.type_name;
         self.breadcrumb.push(frame);
         let result = catch_unwind(AssertUnwindSafe(|| build(self)));
         self.breadcrumb.truncate(depth);
         match result {
-            Ok(result) => result.map_err(|e| e.push_frame(frame.type_name)),
+            Ok(result) => result.map_err(|e| e.push_frame(frame_name)),
             Err(payload) => resume_unwind(payload),
         }
     }
