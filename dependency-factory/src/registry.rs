@@ -130,7 +130,8 @@ impl Registry {
     }
 
     /// Return everything in the index for `T`, in the order it was added.
-    /// Empty if nothing has been added to it.
+    /// Empty if nothing has been added to it. The list is a snapshot:
+    /// additions published after this call are not in it.
     ///
     /// Resources the factory builds are added to their indexes by their
     /// [`Singleton::register`](crate::Singleton::register) or
@@ -284,7 +285,8 @@ impl Transaction<'_> {
 
     /// Return everything in the index for `T`, in the order it was added,
     /// including what this transaction has added and not yet published.
-    /// Empty if nothing has been added to it.
+    /// Empty if nothing has been added to it. The list is a snapshot:
+    /// later additions are not in it.
     pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Vec<Arc<T>> {
         self.overlay
             .indexed::<T>()

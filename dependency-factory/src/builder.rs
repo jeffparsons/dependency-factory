@@ -119,9 +119,9 @@ impl<'a> Builder<'a> {
             return Ok(arc);
         }
         let frame = Frame::singleton::<R>();
-        let value = self.run_build(frame, R::build)?;
+        let value = self.with_frame(frame, R::build)?;
         let arc = self.transaction.get_or_insert_with(|| value);
-        self.run_build(frame, |builder| R::register(&arc, builder))?;
+        self.with_frame(frame, |builder| R::register(&arc, builder))?;
         Ok(arc)
     }
 
@@ -133,11 +133,11 @@ impl<'a> Builder<'a> {
             return Ok(arc);
         }
         let frame = Frame::query(&query);
-        let value = self.run_build(frame, |builder| query.build(builder))?;
+        let value = self.with_frame(frame, |builder| query.build(builder))?;
         let arc = self
             .transaction
             .get_or_insert_with_for(query.clone(), || value);
-        self.run_build(frame, |builder| query.register(&arc, builder))?;
+        self.with_frame(frame, |builder| query.register(&arc, builder))?;
         Ok(arc)
     }
 
@@ -148,7 +148,8 @@ impl<'a> Builder<'a> {
     }
 
     /// Return everything in the index for `T`, in the order it was added,
-    /// including what this builder has added and not yet published.
+    /// including what this builder has added and not yet published. The
+    /// list is a snapshot: later additions are not in it.
     pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Vec<Arc<T>> {
         self.transaction.indexed::<T>()
     }
@@ -157,7 +158,7 @@ impl<'a> Builder<'a> {
     /// maintained around it: a cycle is reported before the call starts,
     /// an error is attributed to the frame, and the frame is popped again
     /// whether the call returns or unwinds.
-    fn run_build<T>(
+    fn with_frame<T>(
         &mut self,
         frame: Frame,
         build: impl FnOnce(&mut Self) -> Result<T, BuildError>,
