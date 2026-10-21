@@ -45,18 +45,21 @@ pub fn run(root: &Path) -> Result<()> {
         Err(e) => issues.push(format!("could not query CI status: {e}")),
     }
 
-    // CHANGELOG and manifest agree on the latest released version.
-    let changelog_content = std::fs::read_to_string(paths.changelog())?;
-    match changelog::latest_released_version(&changelog_content)? {
-        Some(ref ch) if ch == &manifest_version => {}
-        Some(ref ch) => issues.push(format!(
-            "manifest version is {manifest_version} but the latest CHANGELOG section is [{ch}] — \
-             did you forget to rename `[Unreleased]`?"
-        )),
-        None => issues.push(format!(
-            "manifest version is {manifest_version} but CHANGELOG has no released sections — \
-             did you run `cargo xtask release prepare`?"
-        )),
+    // CHANGELOG and manifest agree on the latest released version. Releases
+    // up to 0.1.0 have no section, so there's nothing to compare.
+    if changelog::has_section(&manifest_version) {
+        let changelog_content = std::fs::read_to_string(paths.changelog())?;
+        match changelog::latest_released_version(&changelog_content)? {
+            Some(ref ch) if ch == &manifest_version => {}
+            Some(ref ch) => issues.push(format!(
+                "manifest version is {manifest_version} but the latest CHANGELOG section is [{ch}] — \
+                 did you forget to rename `[Unreleased]`?"
+            )),
+            None => issues.push(format!(
+                "manifest version is {manifest_version} but CHANGELOG has no released sections — \
+                 did you run `cargo xtask release prepare`?"
+            )),
+        }
     }
 
     // Report.

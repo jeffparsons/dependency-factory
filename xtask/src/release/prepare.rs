@@ -22,11 +22,16 @@ pub fn run(version: &Version, root: &Path) -> Result<()> {
     manifest::set_lib_pathdep_version(&paths.lib_manifest(), version)?;
 
     // 3. Rename the [Unreleased] section to the new version with today's date.
-    println!("Renaming CHANGELOG.md [Unreleased] to [{version}]...");
-    let date = today_utc(root)?;
-    let content = std::fs::read_to_string(paths.changelog())?;
-    let new_content = changelog::rename_unreleased(&content, version, &date)?;
-    std::fs::write(paths.changelog(), new_content)?;
+    //    Releases up to 0.1.0 have no notes, so the changelog stays as is.
+    if changelog::has_section(version) {
+        println!("Renaming CHANGELOG.md [Unreleased] to [{version}]...");
+        let date = today_utc(root)?;
+        let content = std::fs::read_to_string(paths.changelog())?;
+        let new_content = changelog::rename_unreleased(&content, version, &date)?;
+        std::fs::write(paths.changelog(), new_content)?;
+    } else {
+        println!("Leaving CHANGELOG.md alone: releases up to 0.1.0 have no notes.");
+    }
 
     // 4. Refresh the lockfile, then build and test.
     println!("Refreshing Cargo.lock and re-building...");

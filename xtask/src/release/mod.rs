@@ -15,14 +15,16 @@ mod verify_tag;
 
 #[derive(Subcommand)]
 pub enum ReleaseCmd {
-    /// Bump versions, update CHANGELOG, refresh Cargo.lock, build & test.
-    /// Leaves the working tree dirty so the user can review and commit.
+    /// Bump versions, update CHANGELOG (for releases after 0.1.0), refresh
+    /// Cargo.lock, build & test. Leaves the working tree dirty so the user
+    /// can review and commit.
     Prepare {
         /// New version, e.g. `0.1.1`.
         version: Version,
     },
     /// Pre-flight checks before tagging: clean tree, on a permitted branch,
-    /// CI green for HEAD, CHANGELOG and manifest agree.
+    /// CI green for HEAD, CHANGELOG and manifest agree (for releases after
+    /// 0.1.0).
     Check,
     /// Verify the pushed tag matches the workspace version. Used by CI.
     VerifyTag,
@@ -30,7 +32,8 @@ pub enum ReleaseCmd {
     /// crates.io, in order, waiting for the registry to index the
     /// proc-macro between publishes. Used by CI.
     Publish,
-    /// Print the CHANGELOG body for the given version on stdout. Used by
+    /// Print the CHANGELOG body for the given version on stdout, or a
+    /// placeholder for releases up to 0.1.0, which have no notes. Used by
     /// CI to populate the GitHub Release body.
     Notes {
         /// Released version, e.g. `0.1.0`.
