@@ -8,11 +8,23 @@ the rare situations the tool can't help with.
 `dependency-factory` and `dependency-factory-derive` are released in
 lockstep at the same version.
 
+## Release notes
+
+We don't keep a changelog before 0.1.0. Only releases *after* 0.1.0 get
+notes. Until 0.1.0 is out, `CHANGELOG.md` holds only an empty
+`## [Unreleased]` heading, so don't add entries to it yet. For releases
+up to and including 0.1.0, `prepare` leaves the changelog alone, `check`
+skips the changelog/manifest comparison, and `notes` prints a short
+placeholder for the GitHub Release body. Starting with the first release
+after 0.1.0, entries go under `## [Unreleased]` and the full flow below
+applies.
+
 ## Typical flow
 
 1. **`cargo xtask release prepare X.Y.Z`** — bumps the workspace version,
    bumps the lib's path-dep pin, renames `## [Unreleased]` to
-   `## [X.Y.Z] - <today>` in `CHANGELOG.md`, refreshes the lockfile,
+   `## [X.Y.Z] - <today>` in `CHANGELOG.md` (after 0.1.0 only; see
+   above), refreshes the lockfile,
    builds, tests, and runs pre-flight publish dry-runs. Leaves the
    working tree dirty.
 2. **Review and commit.** `git diff`, then commit with subject

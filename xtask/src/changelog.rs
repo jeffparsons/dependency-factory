@@ -4,11 +4,23 @@
 //! as a small fixed grammar: section headings are exactly `## [<TAG>]` (the
 //! `[Unreleased]` section) or `## [<VERSION>] - <DATE>` (a released section). The
 //! body of a section is everything between two consecutive section headings.
+//!
+//! We don't keep a changelog until after 0.1.0, so releases up to and including
+//! 0.1.0 have no section; see [`has_section`].
 
 use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
 
 const UNRELEASED_HEADING: &str = "## [Unreleased]";
+
+/// The last version released without a changelog section.
+const LAST_VERSION_WITHOUT_NOTES: Version = Version::new(0, 1, 0);
+
+/// Whether a release of `version` gets a changelog section. Only releases
+/// after 0.1.0 do.
+pub fn has_section(version: &Version) -> bool {
+    version > &LAST_VERSION_WITHOUT_NOTES
+}
 
 /// Rename the `## [Unreleased]` section to a versioned heading and insert a
 /// fresh empty `## [Unreleased]` above it. Returns the new file content.
@@ -109,11 +121,21 @@ Some preamble.
 - A thing.
 - Another thing.
 
-## [0.1.0] - 2026-04-15
+## [0.1.1] - 2026-04-15
 
-### Added
-- The very first release.
+### Fixed
+- The first release with notes.
 ";
+
+    #[test]
+    fn only_releases_after_0_1_0_have_sections() {
+        for v in ["0.0.1", "0.1.0-rc.1", "0.1.0"] {
+            assert!(!has_section(&Version::parse(v).unwrap()), "{v}");
+        }
+        for v in ["0.1.1", "0.2.0-rc.1", "0.2.0", "1.0.0"] {
+            assert!(has_section(&Version::parse(v).unwrap()), "{v}");
+        }
+    }
 
     #[test]
     fn rename_unreleased_swaps_heading_and_inserts_fresh_section() {
@@ -129,7 +151,7 @@ Some preamble.
         assert!(out.contains("## [0.2.0] - 2026-05-04\n\n### Added\n- A thing."));
 
         // The previous release is untouched.
-        assert!(out.contains("## [0.1.0] - 2026-04-15"));
+        assert!(out.contains("## [0.1.1] - 2026-04-15"));
     }
 
     #[test]
@@ -142,11 +164,11 @@ Some preamble.
 
     #[test]
     fn extract_section_returns_body_only() {
-        let v = Version::parse("0.1.0").unwrap();
+        let v = Version::parse("0.1.1").unwrap();
         let body = extract_section(FIXTURE, &v).unwrap();
         // Heading is excluded; leading/trailing blank lines are trimmed so
         // the GitHub Release body doesn't render with extra padding.
-        assert_eq!(body, "### Added\n- The very first release.\n");
+        assert_eq!(body, "### Fixed\n- The first release with notes.\n");
     }
 
     #[test]
@@ -157,7 +179,7 @@ Some preamble.
 ### Added
 - New thing.
 
-## [0.1.0] - 2026-04-15
+## [0.1.1] - 2026-04-15
 
 ### Added
 - Old thing.
@@ -178,7 +200,7 @@ Some preamble.
     #[test]
     fn latest_released_version_skips_unreleased() {
         let v = latest_released_version(FIXTURE).unwrap();
-        assert_eq!(v, Some(Version::parse("0.1.0").unwrap()));
+        assert_eq!(v, Some(Version::parse("0.1.1").unwrap()));
     }
 
     #[test]
