@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use dependency_factory::{BuildError, Builder, DependencyFactory, Key, Query, Singleton};
 
+mod common;
+
 #[derive(Debug)]
 #[allow(dead_code)]
 struct Db {
@@ -157,7 +159,7 @@ fn errors_carry_chain_of_output_type_names() {
     );
     assert_eq!(chain[0].key(), Some("FailingKey"));
     assert_eq!(chain[1].key(), Some("DependsOnFailingKey"));
-    let rendered = format!("{err}");
+    let rendered = common::report(&err);
     assert!(rendered.contains("DependsOnFailing for DependsOnFailingKey"));
     assert!(rendered.contains("Failing for FailingKey"));
     assert!(rendered.contains("upstream is unavailable"));
@@ -187,9 +189,9 @@ fn errors_name_the_key_a_value_was_built_for() {
         frame.to_string(),
         format!(r#"{} for RegionKey("north")"#, frame.type_name())
     );
-    let rendered = format!("{err}");
+    let rendered = common::report(&err);
     assert!(
-        rendered.contains(r#"while building build_queries::Failing for RegionKey("north")"#),
+        rendered.contains(r#"failed to build build_queries::Failing for RegionKey("north")"#),
         "{rendered}"
     );
 }
