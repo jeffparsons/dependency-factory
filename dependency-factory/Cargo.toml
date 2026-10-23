@@ -17,3 +17,6 @@ derive = ["dep:dependency-factory-derive"]
 
 [dependencies]
 dependency-factory-derive = { version = "=0.0.2", path = "../dependency-factory-derive", optional = true }
+
+[dev-dependencies]
+anyhow = "1"

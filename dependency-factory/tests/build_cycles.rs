@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use dependency_factory::{
     BuildError, Builder, CycleError, DependencyFactory, DependencyFactoryHandle, Key, Query,
-    Singleton,
+    ResolveError, Singleton,
 };
 
-fn cycle_of(err: &BuildError) -> &CycleError {
-    err.source()
+mod common;
+
+fn cycle_of(err: &ResolveError) -> &CycleError {
+    err.underlying()
         .downcast_ref::<CycleError>()
         .expect("expected the underlying cause to be a CycleError")
 }
@@ -74,7 +76,7 @@ fn two_step_singleton_cycle_is_detected() {
     assert!(path[0].type_name().ends_with("Alpha"));
     assert!(path[1].type_name().ends_with("Beta"));
     assert!(path[2].type_name().ends_with("Alpha"));
-    let rendered = format!("{err}");
+    let rendered = common::report(&err);
     assert!(rendered.contains("dependency cycle detected"));
 }
 
@@ -114,7 +116,7 @@ fn query_cycle_on_different_keys_is_detected() {
         keys,
         [Some("TreeKey(1)"), Some("TreeKey(2)"), Some("TreeKey(1)")]
     );
-    let rendered = format!("{err}");
+    let rendered = common::report(&err);
     assert!(
         rendered.contains("Tree for TreeKey(1) -> build_cycles::Tree for TreeKey(2) -> "),
         "{rendered}"

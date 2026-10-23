@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use dependency_factory::{BuildError, Builder, DependencyFactory, Key, Query, Singleton};
 
+mod common;
+
 struct Config {
     greeting: String,
 }
@@ -84,7 +86,7 @@ fn derive_propagates_error_with_frame() {
         "outermost: {}",
         chain[1],
     );
-    let rendered = format!("{err}");
+    let rendered = common::report(&err);
     assert!(rendered.contains("DependsOnFailing"));
     assert!(rendered.contains("Failing"));
     assert!(rendered.contains("upstream is unavailable"));

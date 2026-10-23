@@ -278,7 +278,7 @@ fn a_register_error_is_attributed_like_a_build_error_and_the_value_stays_cached(
         .get_or_build::<NeedsUnregisterable>()
         .err()
         .expect("register fails");
-    assert!(err.source().is::<Refused>());
+    assert!(err.underlying().is::<Refused>());
     let chain: Vec<&str> = err
         .chain()
         .iter()

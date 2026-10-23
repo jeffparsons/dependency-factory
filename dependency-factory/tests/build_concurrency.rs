@@ -176,7 +176,7 @@ fn cycle_split_across_threads_is_reported_on_both() {
     for outcome in [ping.join().unwrap(), pong.join().unwrap()] {
         let err = outcome.unwrap_err();
         assert!(
-            err.source().downcast_ref::<CycleError>().is_some(),
+            err.underlying().downcast_ref::<CycleError>().is_some(),
             "expected a CycleError, got: {err}"
         );
     }

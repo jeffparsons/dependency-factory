@@ -120,6 +120,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 name = "dependency-factory"
 version = "0.0.2"
 dependencies = [
+ "anyhow",
  "dependency-factory-derive",
 ]
 
