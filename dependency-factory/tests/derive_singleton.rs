@@ -184,3 +184,160 @@ fn derive_supports_generic_struct() {
     assert_eq!(p.a.greeting, "hello");
     assert_eq!(p.b.config.greeting, "hello");
 }
+
+// --- Fields that are not dependencies ----------------------------------------
+
+trait WarmUp: Send + Sync {
+    fn warm_up(&self);
+}
+
+// Plain state beside a dependency, as in a resource that dedupes
+// concurrent warm-ups, together with an index.
+#[derive(Singleton)]
+#[factory(index(dyn WarmUp))]
+struct Catalog {
+    config: Arc<Config>,
+    #[factory(default)]
+    warmed: std::sync::OnceLock<()>,
+    #[factory(default)]
+    warm_ups: std::sync::atomic::AtomicUsize,
+}
+
+impl WarmUp for Catalog {
+    fn warm_up(&self) {
+        self.warmed.get_or_init(|| {
+            self.warm_ups
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+}
+
+#[test]
+fn derive_fills_a_default_field_with_its_default() {
+    let factory = DependencyFactory::new();
+    let catalog = factory.get_or_build::<Catalog>().unwrap();
+    assert!(Arc::ptr_eq(
+        &catalog.config,
+        &factory.get_or_build::<Config>().unwrap()
+    ));
+    assert!(catalog.warmed.get().is_none());
+    for resource in factory.indexed::<dyn WarmUp>() {
+        resource.warm_up();
+        resource.warm_up();
+    }
+    assert_eq!(
+        catalog.warm_ups.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[derive(Singleton)]
+struct Counters(#[factory(default)] Vec<u32>, Arc<Config>);
+
+#[test]
+fn derive_fills_a_default_field_in_a_tuple_struct() {
+    let factory = DependencyFactory::new();
+    let counters = factory.get_or_build::<Counters>().unwrap();
+    assert!(counters.0.is_empty());
+    assert_eq!(counters.1.greeting, "hello");
+}
+
+fn shout(builder: &mut Builder) -> Result<String, BuildError> {
+    let config = builder.get_or_build::<Config>()?;
+    Ok(config.greeting.to_uppercase())
+}
+
+#[derive(Singleton)]
+struct Shouter {
+    #[factory(build = shout)]
+    line: String,
+}
+
+#[test]
+fn derive_fills_a_build_field_from_its_function() {
+    let factory = DependencyFactory::new();
+    let shouter = factory.get_or_build::<Shouter>().unwrap();
+    assert_eq!(shouter.line, "HELLO");
+    // The function's dependency was built and cached along the way.
+    assert!(factory.get::<Config>().is_some());
+}
+
+// Any error `?` turns into a `BuildError` will do.
+fn read_port(_builder: &mut Builder) -> Result<u16, std::io::Error> {
+    Err(std::io::Error::other("port file is missing"))
+}
+
+#[derive(Debug, Singleton)]
+#[allow(dead_code)]
+struct Listener {
+    #[factory(build = read_port)]
+    port: u16,
+}
+
+#[test]
+fn derive_attributes_a_build_function_error_to_the_struct() {
+    let factory = DependencyFactory::new();
+    let err = factory.get_or_build::<Listener>().unwrap_err();
+    let chain = err.chain();
+    assert_eq!(chain.len(), 1, "chain: {chain:?}");
+    assert!(chain[0].type_name().ends_with("Listener"));
+    assert!(
+        format!("{err:?}").contains("port file is missing"),
+        "{err:?}"
+    );
+}
+
+// Fields are filled in the order they are written, so dependencies are
+// built, and indexed, in that order.
+trait Named: Send + Sync {
+    fn name(&self) -> &'static str;
+}
+
+#[derive(Singleton)]
+#[factory(index(dyn Named))]
+struct First;
+
+impl Named for First {
+    fn name(&self) -> &'static str {
+        "first"
+    }
+}
+
+#[derive(Singleton)]
+#[factory(index(dyn Named))]
+struct Third;
+
+impl Named for Third {
+    fn name(&self) -> &'static str {
+        "third"
+    }
+}
+
+fn indexed_so_far(builder: &mut Builder) -> Result<Vec<&'static str>, BuildError> {
+    Ok(builder
+        .indexed::<dyn Named>()
+        .iter()
+        .map(|named| named.name())
+        .collect())
+}
+
+#[derive(Singleton)]
+struct InOrder {
+    _first: Arc<First>,
+    #[factory(build = indexed_so_far)]
+    seen: Vec<&'static str>,
+    _third: Arc<Third>,
+}
+
+#[test]
+fn derive_fills_fields_in_the_order_written() {
+    let factory = DependencyFactory::new();
+    let in_order = factory.get_or_build::<InOrder>().unwrap();
+    assert_eq!(in_order.seen, ["first"]);
+    let names: Vec<_> = factory
+        .indexed::<dyn Named>()
+        .iter()
+        .map(|named| named.name())
+        .collect();
+    assert_eq!(names, ["first", "third"]);
+}
