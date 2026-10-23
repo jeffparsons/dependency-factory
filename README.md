@@ -13,6 +13,8 @@ Two kinds of resources are supported:
 
 - **Singletons**: one instance per type. Implement `Singleton`, or
   `#[derive(Singleton)]` and let the macro write the dependency wiring for you.
+  A field that isn't a dependency takes `#[factory(default)]`, or
+  `#[factory(build = path::to::fn)]` to be filled by a function.
 - **Keyed resources**: many instances per type, parameterised by a key
   value. Implement `Key` to pair a key type with its value type, and
   `Query` on top of it to say how the value is built from the key.
