@@ -22,7 +22,7 @@ mod tests {
     fn factory_reads_its_registry() {
         let factory = DependencyFactory::new();
         assert!(factory.get::<u32>().is_none());
-        factory.registry().begin().insert(Arc::new(42_u32)).unwrap();
+        factory.begin().insert(Arc::new(42_u32)).unwrap();
         assert_eq!(*factory.get::<u32>().unwrap(), 42);
     }
 
@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn a_handle_upgrades_to_the_factory() {
         let factory = DependencyFactory::new();
-        factory.registry().begin().insert(Arc::new(42_u32)).unwrap();
+        factory.begin().insert(Arc::new(42_u32)).unwrap();
         let handle = factory.handle();
         let upgraded = handle.upgrade().unwrap();
         assert!(Arc::ptr_eq(upgraded.registry(), factory.registry()));
@@ -62,7 +62,7 @@ mod tests {
         let handle = factory.handle();
         let upgraded = handle.upgrade().unwrap();
         drop(factory);
-        upgraded.registry().begin().insert(Arc::new(1_u32)).unwrap();
+        upgraded.begin().insert(Arc::new(1_u32)).unwrap();
         assert_eq!(*handle.upgrade().unwrap().get::<u32>().unwrap(), 1);
         drop(upgraded);
         assert!(handle.upgrade().is_none());
@@ -75,7 +75,6 @@ mod tests {
         let h2 = h1.clone();
         h1.upgrade()
             .unwrap()
-            .registry()
             .begin()
             .insert(Arc::new(1_u32))
             .unwrap();
@@ -101,7 +100,6 @@ mod tests {
         assert!(factory.get_for(&StringKey(7)).is_none());
         let inserted = Arc::new("seven".to_string());
         factory
-            .registry()
             .begin()
             .insert_for(StringKey(7), Arc::clone(&inserted))
             .unwrap();
@@ -129,7 +127,6 @@ mod tests {
         let factory = DependencyFactory::new();
         let inserted = Arc::new("by hand".to_string());
         factory
-            .registry()
             .begin()
             .insert_for(StringKey(3), Arc::clone(&inserted))
             .unwrap();

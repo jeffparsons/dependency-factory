@@ -29,8 +29,8 @@ Resources live in a `Registry`, a thread-safe type-keyed map that knows
 nothing about building. The factory is one client of its registry: it
 reads it to short-circuit and commits what it builds with
 `get_or_insert_with`, so a value already in the registry always wins.
-Anything else can populate the same registry by hand through
-`factory.registry()`.
+The factory derefs to its registry, so reads and hand writes are the
+registry's own methods and anything else can populate it the same way.
 
 Every write goes through a transaction: `registry.begin()` returns a
 `Transaction` carrying `insert` (fails if the slot is taken), `replace`
@@ -116,7 +116,7 @@ assert_eq!(greeter.config.greeting, "hello");
 
 // A value placed in the registry by hand is used instead of building one.
 let factory = DependencyFactory::new();
-factory.registry().begin().insert(Arc::new(Config { greeting: "g'day".into() })).unwrap();
+factory.begin().insert(Arc::new(Config { greeting: "g'day".into() })).unwrap();
 let greeter: Arc<Greeter> = factory.get_or_build().unwrap();
 assert_eq!(greeter.config.greeting, "g'day");
 ```

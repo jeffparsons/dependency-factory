@@ -1,20 +1,25 @@
+use std::ops::Deref;
 use std::sync::{Arc, Weak};
 
 use crate::builder::Builder;
 use crate::error::BuildError;
 use crate::registry::{Key, Registry};
 
-/// A factory over a [`Registry`]: the registry, plus building. Dropping
-/// the last `DependencyFactory` for a registry drops the registry too,
-/// unless someone else holds its `Arc`. A factory is cheap to clone, and
-/// a clone is the same factory.
+/// A factory over a [`Registry`]: the registry, plus building. It derefs
+/// to the registry, so reads ([`get`](Registry::get),
+/// [`get_for`](Registry::get_for), [`indexed`](Registry::indexed)) and
+/// hand writes ([`begin`](Registry::begin)) are the registry's own
+/// methods; the factory adds [`get_or_build`](Self::get_or_build),
+/// [`get_or_build_for`](Self::get_or_build_for) and
+/// [`builder`](Self::builder). Dropping the last `DependencyFactory` for a
+/// registry drops the registry too, unless someone else holds its `Arc`.
+/// A factory is cheap to clone, and a clone is the same factory.
 ///
 /// The factory is one client of its registry: it reads the registry to
 /// short-circuit and commits what it builds through
 /// [`Transaction::get_or_insert_with`](crate::Transaction::get_or_insert_with).
-/// Anything else may populate the
-/// same registry by hand through [`registry`](Self::registry) and
-/// [`Registry::begin`]; a value already present always wins over one the
+/// Anything else may populate the same registry by hand through
+/// `factory.begin()`; a value already present always wins over one the
 /// factory would build.
 ///
 /// Building goes through a [`Builder`], which holds a transaction on the
@@ -44,7 +49,9 @@ impl DependencyFactory {
         Self { registry }
     }
 
-    /// The registry this factory builds into.
+    /// The registry this factory builds into, as the `Arc` the factory
+    /// holds. The factory derefs to the registry, so this is for sharing
+    /// the `Arc` itself, say with [`Builder::new`].
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
     }
@@ -68,12 +75,6 @@ impl DependencyFactory {
         Builder::new(&self.registry)
     }
 
-    /// Return the cached singleton instance of `R`, if one is present.
-    /// Never waits for a builder.
-    pub fn get<R: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<R>> {
-        self.registry.get::<R>()
-    }
-
     /// Return the singleton instance of `R`, building it via `R::build`
     /// if it is not already cached. A cache miss takes a [`Builder`] for
     /// the duration of the call.
@@ -82,12 +83,6 @@ impl DependencyFactory {
             return Ok(arc);
         }
         self.builder().get_or_build()
-    }
-
-    /// Return the cached value for `query`, if one is present. Never waits
-    /// for a builder.
-    pub fn get_for<Q: Query>(&self, query: &Q) -> Option<Arc<Q::Value>> {
-        self.registry.get_for(query)
     }
 
     /// Return the value for `query`, building it via `Q::build` if it is
@@ -99,11 +94,13 @@ impl DependencyFactory {
         }
         self.builder().get_or_build_for(query)
     }
+}
 
-    /// Return everything in the index for `T`, in the order it was added;
-    /// see [`Registry::indexed`]. Never waits for a builder.
-    pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Vec<Arc<T>> {
-        self.registry.indexed::<T>()
+impl Deref for DependencyFactory {
+    type Target = Registry;
+
+    fn deref(&self) -> &Registry {
+        &self.registry
     }
 }
 
@@ -241,7 +238,7 @@ impl DependencyFactoryHandle {
 ///     fn transport(&self) -> &'static str { "fake" }
 /// }
 /// let factory = DependencyFactory::new();
-/// factory.registry().begin().insert::<dyn Mailer>(Arc::new(FakeMailer)).unwrap();
+/// factory.begin().insert::<dyn Mailer>(Arc::new(FakeMailer)).unwrap();
 /// let notifier = factory.get_or_build::<Notifier>().unwrap();
 /// assert_eq!(notifier.mailer.transport(), "fake");
 /// assert!(factory.get::<Smtp>().is_none());
