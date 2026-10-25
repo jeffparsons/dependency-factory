@@ -114,7 +114,6 @@ impl Mailer for FakeMailer {
 fn a_fake_in_the_slot_stands_in_for_the_binding() {
     let factory = DependencyFactory::new();
     factory
-        .registry()
         .begin()
         .insert::<dyn Mailer>(Arc::new(FakeMailer))
         .unwrap();
@@ -131,7 +130,6 @@ fn a_fake_in_the_slot_stands_in_for_the_binding() {
 fn a_binding_may_choose_the_implementation_at_run_time() {
     let factory = DependencyFactory::new();
     factory
-        .registry()
         .begin()
         .insert(Arc::new(Config { dry_run: true }))
         .unwrap();

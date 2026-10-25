@@ -250,7 +250,7 @@ fn a_registry_transaction_holds_off_builders_on_other_threads() {
         let factory = Arc::clone(&factory);
         let released = Arc::clone(&released);
         thread::spawn(move || {
-            let tx = factory.registry().begin();
+            let tx = factory.begin();
             held_tx.send(()).unwrap();
             thread::sleep(Duration::from_millis(50));
             released.store(true, Ordering::SeqCst);
@@ -296,7 +296,7 @@ fn taking_a_builder_waits_for_the_other_thread_to_drop_its_builder() {
 fn get_never_waits_for_a_builder() {
     let _watchdog = watchdog();
     let factory = DependencyFactory::new();
-    factory.registry().begin().insert(Arc::new(7_u32)).unwrap();
+    factory.begin().insert(Arc::new(7_u32)).unwrap();
     let _builder = factory.builder();
     // Same thread, builder held: a lookup must neither wait nor error.
     assert_eq!(*factory.get::<u32>().unwrap(), 7);
@@ -329,7 +329,7 @@ impl Singleton for ReadsViaHandle {
 fn reading_through_a_handle_inside_build_does_not_wait() {
     let _watchdog = watchdog();
     let factory = DependencyFactory::new();
-    factory.registry().begin().insert(Arc::new(7_u32)).unwrap();
+    factory.begin().insert(Arc::new(7_u32)).unwrap();
     let built = factory.get_or_build::<ReadsViaHandle>().unwrap();
     assert_eq!(built.seen.as_deref(), Some(&7));
 }

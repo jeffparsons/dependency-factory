@@ -80,7 +80,6 @@ fn pre_inserted_query_output_short_circuits_build() {
         name: "fake".into(),
     });
     factory
-        .registry()
         .begin()
         .insert_for(DbKey("override"), Arc::clone(&custom))
         .unwrap();

@@ -64,11 +64,7 @@ fn pre_inserted_resource_short_circuits_build() {
     let custom = Arc::new(Config {
         greeting: "g'day".into(),
     });
-    factory
-        .registry()
-        .begin()
-        .insert(Arc::clone(&custom))
-        .unwrap();
+    factory.begin().insert(Arc::clone(&custom)).unwrap();
     let greeter = factory.get_or_build::<Greeter>().unwrap();
     assert!(Arc::ptr_eq(&greeter.config, &custom));
     assert_eq!(greeter.config.greeting, "g'day");

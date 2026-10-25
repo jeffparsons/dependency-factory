@@ -312,7 +312,6 @@ fn frames_in_distinct_factories_do_not_collide() {
     let factory_a = DependencyFactory::new();
     let factory_b = DependencyFactory::new();
     factory_a
-        .registry()
         .begin()
         .insert(Arc::new(factory_b.handle()))
         .unwrap();

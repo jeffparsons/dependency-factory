@@ -157,12 +157,12 @@ fn hand_made_db() -> Arc<Db> {
 fn a_hand_inserted_value_is_not_indexed_unless_the_caller_indexes_it() {
     let factory = DependencyFactory::new();
     let db = hand_made_db();
-    factory.registry().begin().insert(Arc::clone(&db)).unwrap();
+    factory.begin().insert(Arc::clone(&db)).unwrap();
     factory.get_or_build::<Service>().unwrap();
     assert_eq!(db.registered.load(Ordering::SeqCst), 0);
     assert_eq!(names(factory.indexed::<dyn Lifecycle>()), ["Service"]);
 
-    factory.registry().begin().index::<dyn Lifecycle>(db);
+    factory.begin().index::<dyn Lifecycle>(db);
     assert_eq!(names(factory.indexed::<dyn Lifecycle>()), ["Service", "Db"]);
 }
 
@@ -171,7 +171,7 @@ fn a_replaced_value_stays_in_its_indexes_until_the_caller_unindexes_it() {
     let factory = DependencyFactory::new();
     factory.get_or_build::<Service>().unwrap();
     let fresh = hand_made_db();
-    let mut tx = factory.registry().begin();
+    let mut tx = factory.begin();
     let stale = tx.replace(Arc::clone(&fresh)).expect("Db was built");
     // Replacing is a slot write; the indexes still list the old value.
     assert_eq!(names(tx.indexed::<dyn Lifecycle>()), ["Db", "Service"]);
