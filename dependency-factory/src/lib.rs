@@ -9,6 +9,100 @@ pub use error::{BuildError, CycleError, Frame, OccupiedError, ResolveError};
 pub use factory::{DependencyFactory, DependencyFactoryHandle, Query, Singleton};
 pub use registry::{Key, Registry, Transaction};
 
+/// Derive [`Singleton`](trait@Singleton) for a struct whose fields are
+/// built from the factory.
+///
+/// Each field is filled in the order it is written, so dependencies are
+/// built, and added to indexes, in that order. A field with no attribute
+/// is an `Arc<R>` of another singleton, from
+/// [`Builder::get_or_build`]. A `#[factory(...)]` attribute on a field
+/// says otherwise, with one of:
+///
+/// - **`query = key_fn`**: the value for the key `key_fn(builder)`
+///   returns, from [`Builder::get_or_build_for`].
+/// - **`default`**: `Default::default()`, for state that is not a
+///   dependency.
+/// - **`build = build_fn`**: whatever `build_fn(builder)` returns, for
+///   anything else.
+///
+/// `key_fn` and `build_fn` take `&mut Builder` and return a `Result`
+/// whose error `?` converts into a [`BuildError`]; an error ends the
+/// build, attributed to the struct.
+///
+/// On the struct, `#[factory(index(dyn Trait, ...))]` writes a
+/// [`register`](Singleton::register) that adds the value to the index for
+/// each trait named, in order.
+///
+/// ```
+/// use std::sync::{Arc, OnceLock};
+/// use dependency_factory::{BuildError, Builder, DependencyFactory, Singleton};
+///
+/// trait WarmUp: Send + Sync {
+///     fn warm_up(&self);
+/// }
+///
+/// struct Config {
+///     region: String,
+/// }
+///
+/// impl Singleton for Config {
+///     fn build(_: &mut Builder) -> Result<Self, BuildError> {
+///         Ok(Config { region: "north".into() })
+///     }
+/// }
+///
+/// fn catalog_file(builder: &mut Builder) -> Result<String, BuildError> {
+///     let config = builder.get_or_build::<Config>()?;
+///     Ok(format!("catalog-{}.db", config.region))
+/// }
+///
+/// #[derive(Singleton)]
+/// #[factory(index(dyn WarmUp))]
+/// struct Catalog {
+///     config: Arc<Config>,
+///     #[factory(build = catalog_file)]
+///     file: String,
+///     #[factory(default)]
+///     warmed: OnceLock<()>,
+/// }
+///
+/// impl WarmUp for Catalog {
+///     fn warm_up(&self) {
+///         self.warmed.get_or_init(|| { /* load self.file */ });
+///     }
+/// }
+///
+/// let factory = DependencyFactory::new();
+/// let catalog = factory.get_or_build::<Catalog>().unwrap();
+/// assert_eq!(catalog.file, "catalog-north.db");
+/// for resource in factory.indexed::<dyn WarmUp>() {
+///     resource.warm_up();
+/// }
+/// ```
+///
+/// A field takes only one of `query`, `default` and `build`:
+///
+/// ```compile_fail
+/// # use dependency_factory::{BuildError, Builder, Singleton};
+/// # fn zero(_: &mut Builder) -> Result<u32, BuildError> { Ok(0) }
+/// #[derive(Singleton)]
+/// struct Counter {
+///     #[factory(default, build = zero)]
+///     count: u32,
+/// }
+/// ```
+///
+/// and `default` takes no value; a function goes in `build`:
+///
+/// ```compile_fail
+/// # use dependency_factory::Singleton;
+/// # fn zero() -> u32 { 0 }
+/// #[derive(Singleton)]
+/// struct Counter {
+///     #[factory(default = zero)]
+///     count: u32,
+/// }
+/// ```
 #[cfg(feature = "derive")]
 pub use dependency_factory_derive::Singleton;
 

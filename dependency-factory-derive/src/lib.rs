@@ -108,32 +108,64 @@ fn build_struct_body(fields: &Fields) -> syn::Result<TokenStream2> {
     }
 }
 
+/// How the derive fills one field, from the field's `#[factory(...)]`
+/// attribute.
+enum Source {
+    /// `builder.get_or_build()`, for a field with no attribute.
+    Singleton,
+    /// `query = key_fn`: build the value for the key `key_fn` returns.
+    Query(Path),
+    /// `default`: `Default::default()`, for state that is not a
+    /// dependency.
+    Default,
+    /// `build = build_fn`: whatever `build_fn` returns.
+    Build(Path),
+}
+
 fn field_expr(field: &Field) -> syn::Result<TokenStream2> {
-    let mut query: Option<Path> = None;
+    let mut source: Option<(&'static str, Source)> = None;
     for attr in &field.attrs {
         if !attr.path().is_ident("factory") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("query") {
-                if query.is_some() {
-                    return Err(meta.error("`query` may only be specified once per field"));
+            let (name, parsed) = if meta.path.is_ident("query") {
+                ("query", Source::Query(meta.value()?.parse::<Path>()?))
+            } else if meta.path.is_ident("default") {
+                if meta.input.peek(Token![=]) {
+                    return Err(meta.error(
+                        "`default` takes no value; to fill a field with a function, use `build = path::to::build_fn`",
+                    ));
                 }
-                query = Some(meta.value()?.parse::<Path>()?);
-                Ok(())
+                ("default", Source::Default)
+            } else if meta.path.is_ident("build") {
+                ("build", Source::Build(meta.value()?.parse::<Path>()?))
             } else {
-                Err(meta.error(
-                    "unsupported `#[factory(...)]` argument; supported: `query = path::to::key_fn`",
-                ))
+                return Err(meta.error(
+                    "unsupported `#[factory(...)]` argument on a field; supported: `query = path::to::key_fn`, `default`, `build = path::to::build_fn`",
+                ));
+            };
+            if let Some((previous, _)) = &source {
+                return Err(meta.error(if *previous == name {
+                    format!("`{name}` may only be specified once per field")
+                } else {
+                    format!("`{name}` conflicts with `{previous}`; a field takes only one of `query`, `default` and `build`")
+                }));
             }
+            source = Some((name, parsed));
+            Ok(())
         })?;
     }
 
-    Ok(match query {
-        Some(path) => quote! {{
-            let key = #path(builder)?;
-            builder.get_or_build_for(key)?
-        }},
-        None => quote! { builder.get_or_build()? },
-    })
+    Ok(
+        match source.map_or(Source::Singleton, |(_, source)| source) {
+            Source::Singleton => quote! { builder.get_or_build()? },
+            Source::Query(path) => quote! {{
+                let key = #path(builder)?;
+                builder.get_or_build_for(key)?
+            }},
+            Source::Default => quote! { ::core::default::Default::default() },
+            Source::Build(path) => quote! { #path(builder)? },
+        },
+    )
 }
