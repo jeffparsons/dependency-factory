@@ -1,6 +1,9 @@
-use std::sync::Arc;
+//! `Singleton` for a trait object, binding the trait to an implementation,
+//! and the other things a `build` that returns an `Arc` can do.
 
-use dependency_factory::{BuildError, Builder, DependencyFactory, Provide, Singleton};
+use std::sync::{Arc, Weak};
+
+use dependency_factory::{BuildError, Builder, DependencyFactory, Singleton};
 
 /// Whether two `Arc`s, of any types, share one allocation. `Arc::ptr_eq`
 /// is for one type; this compares an `Arc<Smtp>` with the
@@ -22,8 +25,8 @@ struct Config {
 }
 
 impl Singleton for Config {
-    fn build(_: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Config { dry_run: false })
+    fn build(_: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Config { dry_run: false }))
     }
 }
 
@@ -54,8 +57,8 @@ impl Mailer for DryRun {
 // The binding: which implementation stands in for the trait. Resolving
 // Smtp's own singleton fills both slots with one instance; the choice
 // can depend on anything the builder can resolve.
-impl Provide for dyn Mailer {
-    fn provide(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+impl Singleton for dyn Mailer {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         if builder.get_or_build::<Config>()?.dry_run {
             Ok(Arc::new(DryRun))
         } else {
@@ -113,7 +116,7 @@ fn a_fake_in_the_slot_stands_in_for_the_binding() {
     factory
         .registry()
         .begin()
-        .insert_arc::<dyn Mailer>(Arc::new(FakeMailer))
+        .insert::<dyn Mailer>(Arc::new(FakeMailer))
         .unwrap();
     let notifier = factory.get_or_build::<Notifier>().unwrap();
     assert_eq!(notifier.mailer.transport(), "fake");
@@ -130,7 +133,7 @@ fn a_binding_may_choose_the_implementation_at_run_time() {
     factory
         .registry()
         .begin()
-        .insert(Config { dry_run: true })
+        .insert(Arc::new(Config { dry_run: true }))
         .unwrap();
     let mailer = factory.get_or_build::<dyn Mailer>().unwrap();
     assert_eq!(mailer.transport(), "none");
@@ -154,18 +157,20 @@ fn trait_object_slots_through_a_handle_and_a_held_builder() {
     assert!(same_allocation(&built, &mailer));
 }
 
-// --- A sized type that is provided rather than built ------------------------
+// --- A build need not allocate ---------------------------------------------
 
-/// Obtained as an `Arc` from elsewhere, say a pool, rather than built by
-/// value; so not a `Singleton`, but still something the factory can hand
-/// out from its slot.
+/// Obtained as an `Arc` from elsewhere, say a pool, rather than made on
+/// the spot.
 struct Pool {
     id: u32,
 }
 
-impl Provide for Pool {
-    fn provide(_: &mut Builder) -> Result<Arc<Self>, BuildError> {
-        Ok(Arc::new(Pool { id: 7 }))
+static SHARED_POOL: std::sync::LazyLock<Arc<Pool>> =
+    std::sync::LazyLock::new(|| Arc::new(Pool { id: 7 }));
+
+impl Singleton for Pool {
+    fn build(_: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::clone(&SHARED_POOL))
     }
 }
 
@@ -175,14 +180,32 @@ struct UsesPool {
 }
 
 #[test]
-fn a_sized_type_may_be_provided_without_being_a_singleton() {
+fn a_build_may_hand_over_an_arc_it_already_holds() {
     let factory = DependencyFactory::new();
-    assert_eq!(factory.get_or_build::<Pool>().unwrap().id, 7);
+    let pool = factory.get_or_build::<Pool>().unwrap();
+    assert_eq!(pool.id, 7);
+    assert!(Arc::ptr_eq(&pool, &SHARED_POOL));
     let uses_pool = factory.get_or_build::<UsesPool>().unwrap();
-    assert!(same_allocation(
-        &uses_pool.pool,
-        &factory.get::<Pool>().unwrap()
-    ));
+    assert!(Arc::ptr_eq(&uses_pool.pool, &SHARED_POOL));
+}
+
+/// Keeps a `Weak` to itself, for callbacks it hands out later.
+struct SelfAware {
+    me: Weak<SelfAware>,
+}
+
+impl Singleton for SelfAware {
+    fn build(_: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new_cyclic(|me| SelfAware { me: me.clone() }))
+    }
+}
+
+#[test]
+fn a_build_may_give_the_resource_a_weak_to_itself() {
+    let factory = DependencyFactory::new();
+    let resource = factory.get_or_build::<SelfAware>().unwrap();
+    let upgraded = resource.me.upgrade().expect("the registry keeps it alive");
+    assert!(Arc::ptr_eq(&upgraded, &resource));
 }
 
 // --- Errors -----------------------------------------------------------------
@@ -204,15 +227,15 @@ trait Weather: Send + Sync {}
 struct Station;
 
 impl Singleton for Station {
-    fn build(_: &mut Builder) -> Result<Self, BuildError> {
+    fn build(_: &mut Builder) -> Result<Arc<Self>, BuildError> {
         Err(Upstream.into())
     }
 }
 
 impl Weather for Station {}
 
-impl Provide for dyn Weather {
-    fn provide(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+impl Singleton for dyn Weather {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         Ok(builder.get_or_build::<Station>()?)
     }
 }
@@ -227,7 +250,7 @@ fn an_error_names_the_trait_object_and_the_implementation() {
     let chain: Vec<&str> = err.chain().iter().map(|f| f.type_name()).collect();
     assert_eq!(chain.len(), 2, "{chain:?}");
     assert!(chain[0].ends_with("Station"), "{chain:?}");
-    assert_eq!(chain[1], "dyn provide::Weather");
+    assert_eq!(chain[1], "dyn build_trait_objects::Weather");
     assert!(err.chain().iter().all(|f| f.key().is_none()));
     assert!(format!("{err:?}").contains("Upstream"), "{err:?}");
 }
@@ -239,17 +262,17 @@ struct SystemClock {
 }
 
 impl Singleton for SystemClock {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(SystemClock {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(SystemClock {
             _scheduler: builder.get_or_build()?,
-        })
+        }))
     }
 }
 
 impl Clock for SystemClock {}
 
-impl Provide for dyn Clock {
-    fn provide(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+impl Singleton for dyn Clock {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         Ok(builder.get_or_build::<SystemClock>()?)
     }
 }
@@ -267,6 +290,9 @@ fn a_cycle_through_a_trait_object_is_detected() {
     // CycleError's path, which Debug renders.
     let rendered = format!("{err:?}");
     assert!(rendered.contains("CycleError"), "{rendered}");
-    assert!(rendered.contains("dyn provide::Clock"), "{rendered}");
+    assert!(
+        rendered.contains("dyn build_trait_objects::Clock"),
+        "{rendered}"
+    );
     assert!(rendered.contains("SystemClock"), "{rendered}");
 }

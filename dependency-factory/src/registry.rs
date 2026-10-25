@@ -15,9 +15,8 @@ use crate::store::{Store, data_ptr};
 ///
 /// Implement `Key` alone for resources that are inserted by hand, and
 /// [`Query`](crate::Query) on top of it for resources the factory can build.
-/// `Value` may be unsized, a trait object say; such a value goes in as an
-/// `Arc`, through [`Transaction::insert_arc_for`], and `Query` is not for
-/// it.
+/// `Value` may be a trait object; values are held, inserted and built as
+/// `Arc`s, so nothing needs it to be sized.
 ///
 /// A key appears in error messages through its [`Debug`](fmt::Debug)
 /// impl, as in `while building Db for DbKey("users")`. A key that holds
@@ -75,11 +74,12 @@ impl<R: ?Sized + Send + Sync + 'static> Key for SingletonKey<R> {
 ///
 /// Two kinds of entry share one mechanism: singletons, identified by their
 /// type alone (`insert`, `get`, ...), and keyed resources, identified by a
-/// [`Key`] value (`insert_for`, `get_for`, ...). The type may be a trait
-/// object: the singleton slot for `dyn Mailer` holds an
-/// `Arc<dyn Mailer>`, put there as an `Arc` by
-/// [`Transaction::insert_arc`] or by the factory through a
-/// [`Provide`](crate::Provide) impl.
+/// [`Key`] value (`insert_for`, `get_for`, ...). Every value is held as an
+/// `Arc`, and goes in as one. The type may be a trait object: the
+/// singleton slot for `dyn Mailer` holds an `Arc<dyn Mailer>`, put
+/// there by `insert::<dyn Mailer>(Arc::new(fake))`, which coerces the
+/// `Arc` at the call site, or by the factory through a
+/// [`Singleton`](crate::Singleton) impl for the trait object.
 ///
 /// Alongside its entries a registry keeps *indexes*: for any `T`, usually
 /// a trait object such as `dyn WarmUp`, the list of `Arc<T>` that have
@@ -185,20 +185,20 @@ impl fmt::Debug for Registry {
 /// unwinding from a panic is discarded, so a panic never publishes a
 /// partial batch.
 ///
-/// Writes come in three flavours. `insert` fills an empty slot and refuses
-/// an occupied one; `get_or_insert_with` fills an empty slot and otherwise
-/// returns what is there; `replace` overwrites. Replacing does not affect
-/// anyone already holding the previous `Arc`, but it does take the
-/// previous `Arc` out of every index it was in, unless another slot still
-/// holds it. `insert_arc` and `replace_arc` take the value already in an
-/// `Arc`, which is how a value that is not sized, a trait object say,
-/// gets in, and how one `Arc` comes to sit in more than one slot.
+/// Writes take the value in an `Arc`, which is how the registry holds it,
+/// and come in three flavours. `insert` fills an empty slot and refuses an
+/// occupied one; `get_or_insert_with` fills an empty slot and otherwise
+/// returns what is there; `replace` overwrites, and hands back what it
+/// displaced. Replacing does not affect anyone already holding the
+/// previous `Arc`. The same `Arc` may sit in more than one slot.
 ///
-/// A fourth write, [`index`](Self::index), adds an `Arc` to the index for
-/// some `T`, which is the only way an index grows. Inserting a value by
-/// hand does not index it, since the registry cannot tell which traits a
-/// value implements; add it to its indexes next to the insert. Resources
-/// the factory builds index themselves through
+/// Indexes are written separately. [`index`](Self::index) adds an `Arc`
+/// to the index for some `T`, and [`unindex`](Self::unindex) takes it out
+/// again; nothing else changes an index. Inserting a value by hand does
+/// not index it, and replacing one does not unindex it, since the
+/// registry cannot tell which traits a value implements; make those
+/// writes next to the insert or replace. Resources the factory builds
+/// index themselves through
 /// [`Singleton::register`](crate::Singleton::register) and
 /// [`Query::register`](crate::Query::register).
 pub struct Transaction<'a> {
@@ -219,46 +219,29 @@ impl Transaction<'_> {
     }
 
     /// Store `value` as the singleton instance of `R`, if there is none
-    /// yet. Returns the cached `Arc<R>`, or the rejected `value` wrapped in
-    /// an [`OccupiedError`] if an instance was already present.
-    pub fn insert<R: Send + Sync + 'static>(
+    /// yet. Returns the rejected `value` in an [`OccupiedError`] if an
+    /// instance was already present. For a trait object,
+    /// `insert::<dyn Mailer>(Arc::new(fake))` coerces the `Arc` at the
+    /// call site.
+    pub fn insert<R: ?Sized + Send + Sync + 'static>(
         &mut self,
-        value: R,
-    ) -> Result<Arc<R>, OccupiedError<R>> {
+        value: Arc<R>,
+    ) -> Result<(), OccupiedError<R>> {
         self.insert_for(SingletonKey::<R>::new(), value)
     }
 
     /// Store `value` as the singleton instance of `R`, overwriting any
-    /// instance already present. Returns the new `Arc<R>`.
-    pub fn replace<R: Send + Sync + 'static>(&mut self, value: R) -> Arc<R> {
+    /// instance already present, and return that previous instance.
+    pub fn replace<R: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<R>) -> Option<Arc<R>> {
         self.replace_for(SingletonKey::<R>::new(), value)
-    }
-
-    /// Store `value`, already in an `Arc`, as the singleton instance of
-    /// `R`, if there is none yet. Returns the cached `Arc<R>`, or the
-    /// rejected `value` wrapped in an [`OccupiedError`] if an instance was
-    /// already present. For an `R` that is not sized, a trait object say,
-    /// this is the only way in: `insert_arc::<dyn Mailer>(Arc::new(fake))`
-    /// coerces the `Arc` at the call site.
-    pub fn insert_arc<R: ?Sized + Send + Sync + 'static>(
-        &mut self,
-        value: Arc<R>,
-    ) -> Result<Arc<R>, OccupiedError<Arc<R>>> {
-        self.insert_arc_for(SingletonKey::<R>::new(), value)
-    }
-
-    /// Store `value`, already in an `Arc`, as the singleton instance of
-    /// `R`, overwriting any instance already present. Returns `value`.
-    pub fn replace_arc<R: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<R>) -> Arc<R> {
-        self.replace_arc_for(SingletonKey::<R>::new(), value)
     }
 
     /// Return the singleton instance of `R`, storing the result of `make`
     /// first if there is none. `make` is not called when an instance is
     /// already present.
-    pub fn get_or_insert_with<R: Send + Sync + 'static>(
+    pub fn get_or_insert_with<R: ?Sized + Send + Sync + 'static>(
         &mut self,
-        make: impl FnOnce() -> R,
+        make: impl FnOnce() -> Arc<R>,
     ) -> Arc<R> {
         self.get_or_insert_with_for(SingletonKey::<R>::new(), make)
     }
@@ -268,63 +251,48 @@ impl Transaction<'_> {
         self.overlay.get(key).or_else(|| self.back.get(key))
     }
 
-    /// Store `value` under `key`, if the slot is empty. Returns the cached
-    /// `Arc`, or the rejected `value` wrapped in an [`OccupiedError`] if
-    /// the slot was already filled.
+    /// Store `value` under `key`, if the slot is empty. Returns the
+    /// rejected `value` in an [`OccupiedError`] if the slot was already
+    /// filled.
     pub fn insert_for<K: Key>(
         &mut self,
         key: K,
-        value: K::Value,
-    ) -> Result<Arc<K::Value>, OccupiedError<K::Value>>
-    where
-        K::Value: Sized,
-    {
+        value: Arc<K::Value>,
+    ) -> Result<(), OccupiedError<K::Value>> {
         if self.get_for(&key).is_some() {
             return Err(OccupiedError::new(value));
         }
-        Ok(self.replace_arc_for(key, Arc::new(value)))
+        self.overlay.insert(key, value);
+        Ok(())
     }
 
-    /// Store `value` under `key`, overwriting any resource already there.
-    /// Returns the new `Arc`. The previous `Arc`, if any, is removed from
-    /// every index it was in unless another slot still holds it; the new
-    /// one is not indexed.
-    pub fn replace_for<K: Key>(&mut self, key: K, value: K::Value) -> Arc<K::Value>
-    where
-        K::Value: Sized,
-    {
-        self.replace_arc_for(key, Arc::new(value))
+    /// Store `value` under `key`, overwriting any resource already there,
+    /// and return that previous resource. Indexes are untouched: the
+    /// previous `Arc` stays in any it was added to until
+    /// [`unindex`](Self::unindex) takes it out, and the new one is not
+    /// indexed.
+    pub fn replace_for<K: Key>(&mut self, key: K, value: Arc<K::Value>) -> Option<Arc<K::Value>> {
+        let previous = self.get_for(&key);
+        self.overlay.insert(key, value);
+        previous
     }
 
-    /// Store `value`, already in an `Arc`, under `key`, if the slot is
-    /// empty. Returns the cached `Arc`, or the rejected `value` wrapped in
-    /// an [`OccupiedError`] if the slot was already filled. The way in for
-    /// a key whose value is not sized.
-    pub fn insert_arc_for<K: Key>(
+    /// Return the resource stored under `key`, storing the result of `make`
+    /// first if the slot is empty. `make` is not called when the slot is
+    /// already filled. What a [`Builder`](crate::Builder) commits with.
+    pub fn get_or_insert_with_for<K: Key>(
         &mut self,
         key: K,
-        value: Arc<K::Value>,
-    ) -> Result<Arc<K::Value>, OccupiedError<Arc<K::Value>>> {
-        if self.get_for(&key).is_some() {
-            return Err(OccupiedError::new(value));
-        }
-        Ok(self.replace_arc_for(key, value))
-    }
-
-    /// Store `value`, already in an `Arc`, under `key`, overwriting any
-    /// resource already there. Returns `value`. The previous `Arc`, if
-    /// any, is removed from every index it was in unless another slot
-    /// still holds it; the new one is not indexed.
-    pub fn replace_arc_for<K: Key>(&mut self, key: K, value: Arc<K::Value>) -> Arc<K::Value> {
-        let previous = self.get_for(&key);
-        self.overlay.insert(key, Arc::clone(&value));
-        if let Some(previous) = previous {
-            let ptr = data_ptr(&previous);
-            if !self.overlay.holds(ptr, &self.back) {
-                self.unindex(ptr);
+        make: impl FnOnce() -> Arc<K::Value>,
+    ) -> Arc<K::Value> {
+        match self.get_for(&key) {
+            Some(arc) => arc,
+            None => {
+                let arc = make();
+                self.overlay.insert(key, Arc::clone(&arc));
+                arc
             }
         }
-        value
     }
 
     /// Add `item` to the end of the index for `T`. `T` is usually a trait
@@ -339,7 +307,8 @@ impl Transaction<'_> {
     /// # impl WarmUp for Cache { fn warm_up(&self) {} }
     /// let registry = Registry::new();
     /// let mut tx = registry.begin();
-    /// let cache = tx.insert(Cache).unwrap();
+    /// let cache = Arc::new(Cache);
+    /// tx.insert(Arc::clone(&cache)).unwrap();
     /// tx.index::<dyn WarmUp>(cache);
     /// tx.commit();
     /// for resource in registry.indexed::<dyn WarmUp>() {
@@ -348,11 +317,38 @@ impl Transaction<'_> {
     /// ```
     ///
     /// Nothing checks that `item` is a registry value; any `Arc` can be
-    /// indexed. One that is a registry value leaves the index again when
-    /// the value is replaced.
+    /// indexed, and nothing but [`unindex`](Self::unindex) takes it out
+    /// again.
     pub fn index<T: ?Sized + Send + Sync + 'static>(&mut self, item: Arc<T>) {
         self.overlay.adopt_index(TypeId::of::<T>(), &self.back);
         self.overlay.index(item);
+    }
+
+    /// Remove `item` from the index for `T`, wherever it appears in it.
+    /// The inverse of [`index`](Self::index): `item` is matched by
+    /// allocation, so an `Arc<Resource>` coerced to `Arc<dyn Trait>` here
+    /// matches the one `index` was given, and only the index for `T` is
+    /// touched. A value replaced in its slot is still in its indexes
+    /// until this takes it out:
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use dependency_factory::Registry;
+    /// # trait WarmUp: Send + Sync { fn warm_up(&self); }
+    /// # struct Cache;
+    /// # impl WarmUp for Cache { fn warm_up(&self) {} }
+    /// # let registry = Registry::new();
+    /// # registry.begin().insert(Arc::new(Cache)).unwrap();
+    /// let mut tx = registry.begin();
+    /// let fresh = Arc::new(Cache);
+    /// if let Some(stale) = tx.replace(Arc::clone(&fresh)) {
+    ///     tx.unindex::<dyn WarmUp>(stale);
+    /// }
+    /// tx.index::<dyn WarmUp>(fresh);
+    /// ```
+    pub fn unindex<T: ?Sized + Send + Sync + 'static>(&mut self, item: Arc<T>) {
+        self.overlay.adopt_index(TypeId::of::<T>(), &self.back);
+        self.overlay.unindex::<T>(data_ptr(&item));
     }
 
     /// Return everything in the index for `T`, in the order it was added,
@@ -365,51 +361,6 @@ impl Transaction<'_> {
             .or_else(|| self.back.indexed::<T>())
             .cloned()
             .unwrap_or_default()
-    }
-
-    /// Remove every `Arc` to `ptr` from every index, bringing each index
-    /// that held one into the overlay first so the removal is part of this
-    /// transaction's batch.
-    fn unindex(&mut self, ptr: *const ()) {
-        let in_back: Vec<TypeId> = self
-            .back
-            .index_ids()
-            .filter(|&id| self.back.index_contains(id, ptr))
-            .collect();
-        for id in in_back {
-            self.overlay.adopt_index(id, &self.back);
-        }
-        self.overlay.unindex(ptr);
-    }
-
-    /// Return the resource stored under `key`, storing the result of `make`
-    /// first if the slot is empty. `make` is not called when the slot is
-    /// already filled.
-    pub fn get_or_insert_with_for<K: Key>(
-        &mut self,
-        key: K,
-        make: impl FnOnce() -> K::Value,
-    ) -> Arc<K::Value>
-    where
-        K::Value: Sized,
-    {
-        match self.get_for(&key) {
-            Some(arc) => arc,
-            None => self.replace_arc_for(key, Arc::new(make())),
-        }
-    }
-
-    /// Return the resource stored under `key`, storing `value` first if the
-    /// slot is empty. What a [`Builder`](crate::Builder) commits with.
-    pub(crate) fn get_or_insert_arc_for<K: Key>(
-        &mut self,
-        key: K,
-        value: Arc<K::Value>,
-    ) -> Arc<K::Value> {
-        match self.get_for(&key) {
-            Some(arc) => arc,
-            None => self.replace_arc_for(key, value),
-        }
     }
 
     /// End the transaction and publish its writes. Dropping the
@@ -471,8 +422,8 @@ mod tests {
     #[test]
     fn insert_and_get_singleton() {
         let registry = Registry::new();
-        let inserted = registry.begin().insert(42_u32).unwrap();
-        assert_eq!(*inserted, 42);
+        let inserted = Arc::new(42_u32);
+        registry.begin().insert(Arc::clone(&inserted)).unwrap();
         let got = registry.get::<u32>().unwrap();
         assert!(Arc::ptr_eq(&inserted, &got));
     }
@@ -486,8 +437,8 @@ mod tests {
     #[test]
     fn singletons_are_keyed_by_type() {
         let registry = Registry::new();
-        registry.begin().insert(1_u32).unwrap();
-        registry.begin().insert(2_u64).unwrap();
+        registry.begin().insert(Arc::new(1_u32)).unwrap();
+        registry.begin().insert(Arc::new(2_u64)).unwrap();
         assert_eq!(*registry.get::<u32>().unwrap(), 1);
         assert_eq!(*registry.get::<u64>().unwrap(), 2);
     }
@@ -495,31 +446,34 @@ mod tests {
     #[test]
     fn insert_refuses_an_occupied_slot() {
         let registry = Registry::new();
-        registry.begin().insert(1_u32).unwrap();
-        let err = registry.begin().insert(2_u32).unwrap_err();
-        assert_eq!(err.into_value(), 2);
+        registry.begin().insert(Arc::new(1_u32)).unwrap();
+        let err = registry.begin().insert(Arc::new(2_u32)).unwrap_err();
+        assert_eq!(**err.value(), 2);
+        assert_eq!(*err.into_value(), 2);
         assert_eq!(*registry.get::<u32>().unwrap(), 1);
     }
 
     #[test]
-    fn replace_overwrites_an_occupied_slot() {
+    fn replace_overwrites_an_occupied_slot_and_returns_the_previous_value() {
         let registry = Registry::new();
-        let first = registry.begin().insert(1_u32).unwrap();
-        let second = registry.begin().replace(2_u32);
-        assert_eq!(*registry.get::<u32>().unwrap(), 2);
+        assert!(registry.begin().replace(Arc::new(1_u32)).is_none());
+        let first = registry.get::<u32>().unwrap();
+        let second = Arc::new(2_u32);
+        let previous = registry.begin().replace(Arc::clone(&second)).unwrap();
+        assert!(Arc::ptr_eq(&previous, &first));
+        assert!(Arc::ptr_eq(&second, &registry.get::<u32>().unwrap()));
         // The previous Arc is unaffected for anyone still holding it.
         assert_eq!(*first, 1);
-        assert!(Arc::ptr_eq(&second, &registry.get::<u32>().unwrap()));
     }
 
     #[test]
     fn get_or_insert_with_fills_an_empty_slot_only() {
         let registry = Registry::new();
-        let made = registry.begin().get_or_insert_with(|| 1_u32);
+        let made = registry.begin().get_or_insert_with(|| Arc::new(1_u32));
         assert_eq!(*made, 1);
         let kept = registry
             .begin()
-            .get_or_insert_with(|| -> u32 { panic!("must not be called") });
+            .get_or_insert_with(|| -> Arc<u32> { panic!("must not be called") });
         assert!(Arc::ptr_eq(&made, &kept));
     }
 
@@ -530,14 +484,18 @@ mod tests {
         type Value = String;
     }
 
+    fn string(s: &str) -> Arc<String> {
+        Arc::new(s.to_string())
+    }
+
     #[test]
     fn insert_for_and_get_for_round_trip() {
         let registry = Registry::new();
-        let inserted = registry
+        let inserted = string("seven");
+        registry
             .begin()
-            .insert_for(StringKey(7), "seven".to_string())
+            .insert_for(StringKey(7), Arc::clone(&inserted))
             .unwrap();
-        assert_eq!(*inserted, "seven");
         let got = registry.get_for(&StringKey(7)).unwrap();
         assert!(Arc::ptr_eq(&inserted, &got));
     }
@@ -553,11 +511,11 @@ mod tests {
         let registry = Registry::new();
         registry
             .begin()
-            .insert_for(StringKey(1), "one".into())
+            .insert_for(StringKey(1), string("one"))
             .unwrap();
         registry
             .begin()
-            .insert_for(StringKey(2), "two".into())
+            .insert_for(StringKey(2), string("two"))
             .unwrap();
         assert_eq!(*registry.get_for(&StringKey(1)).unwrap(), "one");
         assert_eq!(*registry.get_for(&StringKey(2)).unwrap(), "two");
@@ -568,13 +526,13 @@ mod tests {
         let registry = Registry::new();
         registry
             .begin()
-            .insert_for(StringKey(1), "first".into())
+            .insert_for(StringKey(1), string("first"))
             .unwrap();
         let err = registry
             .begin()
-            .insert_for(StringKey(1), "second".into())
+            .insert_for(StringKey(1), string("second"))
             .unwrap_err();
-        assert_eq!(err.into_value(), "second");
+        assert_eq!(*err.into_value(), "second");
         assert_eq!(*registry.get_for(&StringKey(1)).unwrap(), "first");
     }
 
@@ -583,9 +541,13 @@ mod tests {
         let registry = Registry::new();
         registry
             .begin()
-            .insert_for(StringKey(1), "first".into())
+            .insert_for(StringKey(1), string("first"))
             .unwrap();
-        registry.begin().replace_for(StringKey(1), "second".into());
+        let previous = registry
+            .begin()
+            .replace_for(StringKey(1), string("second"))
+            .unwrap();
+        assert_eq!(*previous, "first");
         assert_eq!(*registry.get_for(&StringKey(1)).unwrap(), "second");
     }
 
@@ -594,7 +556,7 @@ mod tests {
         let registry = Registry::new();
         let made = registry
             .begin()
-            .get_or_insert_with_for(StringKey(3), || "three".into());
+            .get_or_insert_with_for(StringKey(3), || string("three"));
         let kept = registry
             .begin()
             .get_or_insert_with_for(StringKey(3), || panic!("must not be called"));
@@ -605,12 +567,11 @@ mod tests {
     fn occupied_error_is_debug_without_a_debug_value() {
         struct Opaque;
         let registry = Registry::new();
-        registry.begin().insert(Opaque).unwrap();
+        registry.begin().insert(Arc::new(Opaque)).unwrap();
         let err = registry
             .begin()
-            .insert(Opaque)
-            .err()
-            .expect("slot is occupied");
+            .insert(Arc::new(Opaque))
+            .expect_err("slot is occupied");
         let rendered = format!("{err:?}");
         assert!(rendered.contains("Opaque"), "{rendered}");
     }
@@ -621,12 +582,14 @@ mod tests {
     fn a_transaction_sees_its_own_writes_before_they_are_published() {
         let registry = Registry::new();
         let mut tx = registry.begin();
-        let inserted = tx.insert(1_u32).unwrap();
+        let inserted = Arc::new(1_u32);
+        tx.insert(Arc::clone(&inserted)).unwrap();
         assert!(Arc::ptr_eq(&inserted, &tx.get::<u32>().unwrap()));
-        let err = tx.insert(2_u32).unwrap_err();
-        assert_eq!(err.into_value(), 2);
-        assert_eq!(*tx.get_or_insert_with(|| 3_u32), 1);
-        tx.replace(4_u32);
+        let err = tx.insert(Arc::new(2_u32)).unwrap_err();
+        assert_eq!(*err.into_value(), 2);
+        assert_eq!(*tx.get_or_insert_with(|| Arc::new(3_u32)), 1);
+        let previous = tx.replace(Arc::new(4_u32)).unwrap();
+        assert!(Arc::ptr_eq(&previous, &inserted));
         assert_eq!(*tx.get::<u32>().unwrap(), 4);
     }
 
@@ -634,8 +597,8 @@ mod tests {
     fn a_transaction_publishes_its_writes_together_when_dropped() {
         let registry = Registry::new();
         let mut tx = registry.begin();
-        tx.insert(1_u32).unwrap();
-        tx.insert(2_u64).unwrap();
+        tx.insert(Arc::new(1_u32)).unwrap();
+        tx.insert(Arc::new(2_u64)).unwrap();
         // Same thread, transaction open: reads neither wait nor see the batch.
         assert!(registry.get::<u32>().is_none());
         assert!(registry.get::<u64>().is_none());
@@ -647,7 +610,7 @@ mod tests {
     #[test]
     fn a_transaction_on_another_thread_holds_off_writes_but_not_reads() {
         let registry = Arc::new(Registry::new());
-        registry.begin().insert(1_u32).unwrap();
+        registry.begin().insert(Arc::new(1_u32)).unwrap();
         let (held_tx, held_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
 
@@ -655,7 +618,7 @@ mod tests {
             let registry = Arc::clone(&registry);
             thread::spawn(move || {
                 let mut tx = registry.begin();
-                tx.replace(2_u32);
+                tx.replace(Arc::new(2_u32));
                 held_tx.send(()).unwrap();
                 // Hold until told to let go, or until the writer below has
                 // had long enough to prove it is blocked.
@@ -671,7 +634,7 @@ mod tests {
         // A write waits for the transaction, and lands after its batch.
         let writer = {
             let registry = Arc::clone(&registry);
-            thread::spawn(move || registry.begin().replace(3_u32))
+            thread::spawn(move || registry.begin().replace(Arc::new(3_u32)))
         };
         thread::sleep(Duration::from_millis(20));
         assert_eq!(*registry.get::<u32>().unwrap(), 1, "writer got in early");
@@ -684,11 +647,11 @@ mod tests {
     #[test]
     fn a_panic_discards_the_transaction_and_does_not_poison_the_registry() {
         let registry = Registry::new();
-        registry.begin().insert(0_u32).unwrap();
+        registry.begin().insert(Arc::new(0_u32)).unwrap();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut tx = registry.begin();
-            tx.replace(1_u32);
-            tx.insert(1_u64).unwrap();
+            tx.replace(Arc::new(1_u32));
+            tx.insert(Arc::new(1_u64)).unwrap();
             panic!("inside the transaction");
         }));
         assert!(outcome.is_err());
@@ -696,29 +659,30 @@ mod tests {
         assert_eq!(*registry.get::<u32>().unwrap(), 0);
         assert!(registry.get::<u64>().is_none());
         // ...and the registry is usable again.
-        registry.begin().insert(2_u64).unwrap();
+        registry.begin().insert(Arc::new(2_u64)).unwrap();
         assert_eq!(*registry.get::<u64>().unwrap(), 2);
     }
 
     #[test]
     fn commit_publishes_and_discard_does_not() {
         let registry = Registry::new();
-        registry.begin().insert(0_u32).unwrap();
+        registry.begin().insert(Arc::new(0_u32)).unwrap();
 
         let mut tx = registry.begin();
-        tx.replace(1_u32);
-        tx.insert(1_u64).unwrap();
+        tx.replace(Arc::new(1_u32));
+        tx.insert(Arc::new(1_u64)).unwrap();
         tx.discard();
         assert_eq!(*registry.get::<u32>().unwrap(), 0);
         assert!(registry.get::<u64>().is_none());
 
         let mut tx = registry.begin();
-        tx.replace(2_u32);
-        tx.insert(2_u64).unwrap();
+        tx.replace(Arc::new(2_u32));
+        tx.insert(Arc::new(2_u64)).unwrap();
         tx.commit();
         assert_eq!(*registry.get::<u32>().unwrap(), 2);
         assert_eq!(*registry.get::<u64>().unwrap(), 2);
     }
+
     // --- Indexes -------------------------------------------------------------
 
     trait Named: Send + Sync {
@@ -745,14 +709,15 @@ mod tests {
     #[test]
     fn index_keeps_insertion_order_across_transactions() {
         let registry = Registry::new();
-        let one = registry.begin().insert("one".to_string()).unwrap();
+        let one = string("one");
+        registry.begin().insert(Arc::clone(&one)).unwrap();
         registry
             .begin()
             .index::<dyn Named>(Arc::clone(&one) as Arc<dyn Named>);
         {
             let mut tx = registry.begin();
-            tx.index::<dyn Named>(Arc::new("two".to_string()));
-            tx.index::<dyn Named>(Arc::new("three".to_string()));
+            tx.index::<dyn Named>(string("two"));
+            tx.index::<dyn Named>(string("three"));
         }
         assert_eq!(
             names(registry.indexed::<dyn Named>()),
@@ -765,11 +730,9 @@ mod tests {
     #[test]
     fn an_index_addition_is_published_with_the_batch() {
         let registry = Registry::new();
-        registry
-            .begin()
-            .index::<dyn Named>(Arc::new("one".to_string()));
+        registry.begin().index::<dyn Named>(string("one"));
         let mut tx = registry.begin();
-        tx.index::<dyn Named>(Arc::new("two".to_string()));
+        tx.index::<dyn Named>(string("two"));
         assert_eq!(names(tx.indexed::<dyn Named>()), ["one", "two"]);
         assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
         drop(tx);
@@ -777,20 +740,23 @@ mod tests {
     }
 
     #[test]
-    fn discard_and_panic_drop_index_additions() {
+    fn discard_and_panic_drop_index_changes() {
         let registry = Registry::new();
+        let one = string("one");
         registry
             .begin()
-            .index::<dyn Named>(Arc::new("one".to_string()));
+            .index::<dyn Named>(Arc::clone(&one) as Arc<dyn Named>);
 
         let mut tx = registry.begin();
-        tx.index::<dyn Named>(Arc::new("two".to_string()));
+        tx.index::<dyn Named>(string("two"));
+        tx.unindex::<dyn Named>(Arc::clone(&one) as Arc<dyn Named>);
         tx.discard();
         assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut tx = registry.begin();
-            tx.index::<dyn Named>(Arc::new("two".to_string()));
+            tx.index::<dyn Named>(string("two"));
+            tx.unindex::<dyn Named>(Arc::clone(&one) as Arc<dyn Named>);
             panic!("inside the transaction");
         }));
         assert!(outcome.is_err());
@@ -798,165 +764,79 @@ mod tests {
     }
 
     #[test]
-    fn replace_removes_the_previous_value_from_every_index() {
+    fn replace_leaves_indexes_alone() {
         let registry = Registry::new();
-        let old = {
+        let old = string("old");
+        {
             let mut tx = registry.begin();
-            let old = tx.insert("old".to_string()).unwrap();
-            tx.index::<dyn Named>(Arc::new("before".to_string()));
+            tx.insert(Arc::clone(&old)).unwrap();
             tx.index::<dyn Named>(Arc::clone(&old) as Arc<dyn Named>);
-            tx.index::<dyn Named>(Arc::new("after".to_string()));
+        }
+        let new = string("new");
+        let previous = registry.begin().replace(Arc::clone(&new)).unwrap();
+        assert!(Arc::ptr_eq(&previous, &old));
+        assert!(Arc::ptr_eq(&new, &registry.get::<String>().unwrap()));
+        // The old value is still indexed, and the new one is not.
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["old"]);
+    }
+
+    #[test]
+    fn unindex_removes_from_one_index_and_is_published_with_the_batch() {
+        let registry = Registry::new();
+        let old = string("old");
+        {
+            let mut tx = registry.begin();
+            tx.insert(Arc::clone(&old)).unwrap();
+            tx.index::<dyn Named>(string("before"));
+            tx.index::<dyn Named>(Arc::clone(&old) as Arc<dyn Named>);
+            tx.index::<dyn Named>(string("after"));
             tx.index::<String>(Arc::clone(&old));
-            // An index the old value is not in.
-            tx.index::<u32>(Arc::new(1));
-            old
-        };
-        assert_eq!(
-            names(registry.indexed::<dyn Named>()),
-            ["before", "old", "after"]
-        );
+        }
 
         // The removal is staged with the batch, like any other write.
         let mut tx = registry.begin();
-        let new = tx.replace("new".to_string());
+        tx.unindex::<dyn Named>(Arc::clone(&old) as Arc<dyn Named>);
         assert_eq!(names(tx.indexed::<dyn Named>()), ["before", "after"]);
-        assert!(tx.indexed::<String>().is_empty());
         assert_eq!(
             names(registry.indexed::<dyn Named>()),
             ["before", "old", "after"]
         );
         drop(tx);
         assert_eq!(names(registry.indexed::<dyn Named>()), ["before", "after"]);
-        assert!(registry.indexed::<String>().is_empty());
-        assert_eq!(registry.indexed::<u32>().len(), 1);
-        // The old Arc is unaffected for anyone still holding it, and the
-        // new value is not indexed.
-        assert_eq!(*old, "old");
-        assert!(Arc::ptr_eq(&new, &registry.get::<String>().unwrap()));
+        // Only the index for the named type is touched...
+        assert_eq!(registry.indexed::<String>().len(), 1);
+        // ...and the slot is untouched.
+        assert!(Arc::ptr_eq(&old, &registry.get::<String>().unwrap()));
     }
 
     #[test]
-    fn replace_within_one_transaction_unindexes_too() {
+    fn unindex_within_one_transaction() {
         let registry = Registry::new();
         let mut tx = registry.begin();
-        let old = tx.insert("old".to_string()).unwrap();
+        let old = string("old");
         tx.index::<dyn Named>(Arc::clone(&old) as Arc<dyn Named>);
-        tx.replace("new".to_string());
+        tx.unindex::<dyn Named>(old);
         assert!(tx.indexed::<dyn Named>().is_empty());
         drop(tx);
         assert!(registry.indexed::<dyn Named>().is_empty());
     }
 
     #[test]
-    fn replacing_an_unindexed_value_leaves_indexes_alone() {
+    fn unindex_matches_by_allocation_not_by_value() {
         let registry = Registry::new();
-        registry.begin().insert(1_u32).unwrap();
+        let one = string("one");
         registry
             .begin()
-            .index::<dyn Named>(Arc::new("one".to_string()));
-        registry.begin().replace(2_u32);
+            .index::<dyn Named>(Arc::clone(&one) as Arc<dyn Named>);
+        // An equal but distinct value is not the same allocation.
+        registry.begin().unindex::<dyn Named>(string("one"));
         assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
-    }
-
-    // --- Unsized values, and one Arc in two slots ----------------------------
-
-    #[test]
-    fn insert_arc_fills_a_trait_object_slot() {
-        let registry = Registry::new();
-        let one: Arc<dyn Named> = Arc::new("one".to_string());
-        let stored = registry
-            .begin()
-            .insert_arc::<dyn Named>(Arc::clone(&one))
-            .unwrap();
-        assert!(Arc::ptr_eq(&stored, &one));
-        assert_eq!(registry.get::<dyn Named>().unwrap().name(), "one");
-        // Occupied like any other slot; the rejected Arc comes back.
-        let rejected = registry
-            .begin()
-            .insert_arc::<dyn Named>(Arc::new("two".to_string()))
-            .err()
-            .expect("the slot is occupied");
-        assert_eq!(rejected.into_value().name(), "two");
-        registry
-            .begin()
-            .replace_arc::<dyn Named>(Arc::new("three".to_string()));
-        assert_eq!(registry.get::<dyn Named>().unwrap().name(), "three");
-        assert!(registry.begin().get::<dyn Named>().is_some());
-    }
-
-    #[derive(Hash, Eq, PartialEq, Clone, Debug)]
-    struct Slot(u32);
-
-    impl Key for Slot {
-        type Value = dyn Named;
-    }
-
-    #[test]
-    fn a_key_may_have_an_unsized_value() {
-        let registry = Registry::new();
-        registry
-            .begin()
-            .insert_arc_for(Slot(1), Arc::new("one".to_string()))
-            .unwrap();
-        assert_eq!(registry.get_for(&Slot(1)).unwrap().name(), "one");
-        assert!(registry.get_for(&Slot(2)).is_none());
-        assert!(
-            registry
-                .begin()
-                .insert_arc_for(Slot(1), Arc::new("uno".to_string()))
-                .is_err()
-        );
-        registry
-            .begin()
-            .replace_arc_for(Slot(1), Arc::new("uno".to_string()));
-        assert_eq!(registry.get_for(&Slot(1)).unwrap().name(), "uno");
-    }
-
-    #[test]
-    fn replacing_one_of_two_slots_sharing_an_arc_keeps_its_indexes() {
-        let registry = Registry::new();
-        let shared = Arc::new("shared".to_string());
-        {
-            let mut tx = registry.begin();
-            tx.insert_arc(Arc::clone(&shared)).unwrap();
-            tx.insert_arc(Arc::clone(&shared) as Arc<dyn Named>)
-                .unwrap();
-            tx.index::<dyn Named>(Arc::clone(&shared) as Arc<dyn Named>);
-        }
-        // The other slot is in the back buffer.
-        registry
-            .begin()
-            .replace_arc::<dyn Named>(Arc::new("other".to_string()));
-        assert_eq!(names(registry.indexed::<dyn Named>()), ["shared"]);
-        // Replacing the last slot that holds it takes it out.
-        registry.begin().replace("last".to_string());
-        assert!(registry.indexed::<dyn Named>().is_empty());
-    }
-
-    #[test]
-    fn replacing_within_one_transaction_sees_the_other_slot_in_the_overlay() {
-        let registry = Registry::new();
-        let shared = Arc::new("shared".to_string());
-        let mut tx = registry.begin();
-        tx.insert_arc(Arc::clone(&shared)).unwrap();
-        tx.insert_arc(Arc::clone(&shared) as Arc<dyn Named>)
-            .unwrap();
-        tx.index::<dyn Named>(Arc::clone(&shared) as Arc<dyn Named>);
-        tx.replace_arc::<dyn Named>(Arc::new("other".to_string()));
-        assert_eq!(names(tx.indexed::<dyn Named>()), ["shared"]);
-        tx.replace("last".to_string());
-        assert!(tx.indexed::<dyn Named>().is_empty());
-    }
-
-    #[test]
-    fn replacing_a_value_with_itself_keeps_its_indexes() {
-        let registry = Registry::new();
-        let value = registry.begin().insert("same".to_string()).unwrap();
-        registry
-            .begin()
-            .index::<dyn Named>(Arc::clone(&value) as Arc<dyn Named>);
-        registry.begin().replace_arc(Arc::clone(&value));
-        assert_eq!(names(registry.indexed::<dyn Named>()), ["same"]);
+        // Something never indexed, and an index that does not exist, are
+        // no-ops rather than errors.
+        registry.begin().unindex::<dyn Named>(string("two"));
+        registry.begin().unindex::<u32>(Arc::new(1));
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
+        assert!(registry.indexed::<u32>().is_empty());
     }
 
     #[test]
@@ -975,20 +855,86 @@ mod tests {
         }
 
         assert_buffers_agree(&registry);
-        registry
-            .begin()
-            .index::<dyn Named>(Arc::new("one".to_string()));
+        registry.begin().index::<dyn Named>(string("one"));
         assert_buffers_agree(&registry);
+        let two = string("two");
         {
             let mut tx = registry.begin();
-            let two = tx.insert("two".to_string()).unwrap();
+            tx.insert(Arc::clone(&two)).unwrap();
             tx.index::<dyn Named>(Arc::clone(&two) as Arc<dyn Named>);
-            tx.index::<dyn Named>(Arc::new("three".to_string()));
+            tx.index::<dyn Named>(string("three"));
         }
         assert_buffers_agree(&registry);
-        registry.begin().replace("deux".to_string());
+        registry.begin().unindex::<dyn Named>(two);
         assert_buffers_agree(&registry);
         assert_eq!(names(registry.indexed::<dyn Named>()), ["one", "three"]);
+    }
+
+    // --- Trait-object values, and one Arc in two slots ------------------------
+
+    #[test]
+    fn a_singleton_slot_may_hold_a_trait_object() {
+        let registry = Registry::new();
+        let one: Arc<dyn Named> = string("one");
+        registry
+            .begin()
+            .insert::<dyn Named>(Arc::clone(&one))
+            .unwrap();
+        assert!(Arc::ptr_eq(&registry.get::<dyn Named>().unwrap(), &one));
+        // Occupied like any other slot; the rejected Arc comes back.
+        let rejected = registry
+            .begin()
+            .insert::<dyn Named>(string("two"))
+            .expect_err("the slot is occupied");
+        assert_eq!(rejected.into_value().name(), "two");
+        let previous = registry
+            .begin()
+            .replace::<dyn Named>(string("three"))
+            .unwrap();
+        assert_eq!(previous.name(), "one");
+        assert_eq!(registry.get::<dyn Named>().unwrap().name(), "three");
+        assert!(registry.begin().get::<dyn Named>().is_some());
+    }
+
+    #[derive(Hash, Eq, PartialEq, Clone, Debug)]
+    struct Slot(u32);
+
+    impl Key for Slot {
+        type Value = dyn Named;
+    }
+
+    #[test]
+    fn a_key_may_have_a_trait_object_value() {
+        let registry = Registry::new();
+        registry.begin().insert_for(Slot(1), string("one")).unwrap();
+        assert_eq!(registry.get_for(&Slot(1)).unwrap().name(), "one");
+        assert!(registry.get_for(&Slot(2)).is_none());
+        assert!(registry.begin().insert_for(Slot(1), string("uno")).is_err());
+        registry.begin().replace_for(Slot(1), string("uno"));
+        assert_eq!(registry.get_for(&Slot(1)).unwrap().name(), "uno");
+        let made = registry
+            .begin()
+            .get_or_insert_with_for(Slot(2), || string("two"));
+        assert_eq!(made.name(), "two");
+    }
+
+    #[test]
+    fn one_arc_may_sit_in_two_slots() {
+        let registry = Registry::new();
+        let shared = string("shared");
+        {
+            let mut tx = registry.begin();
+            tx.insert(Arc::clone(&shared)).unwrap();
+            tx.insert(Arc::clone(&shared) as Arc<dyn Named>).unwrap();
+        }
+        assert!(Arc::ptr_eq(&registry.get::<String>().unwrap(), &shared));
+        assert_eq!(
+            data_ptr(&registry.get::<dyn Named>().unwrap()),
+            data_ptr(&shared)
+        );
+        // Replacing one slot leaves the other alone.
+        registry.begin().replace::<dyn Named>(string("other"));
+        assert!(Arc::ptr_eq(&registry.get::<String>().unwrap(), &shared));
     }
 
     // --- The overlay and the two buffers -------------------------------------
@@ -996,9 +942,9 @@ mod tests {
     #[test]
     fn a_transaction_shadows_a_published_entry_until_it_commits() {
         let registry = Registry::new();
-        registry.begin().insert(1_u32).unwrap();
+        registry.begin().insert(Arc::new(1_u32)).unwrap();
         let mut tx = registry.begin();
-        tx.replace(2_u32);
+        tx.replace(Arc::new(2_u32));
         assert_eq!(*tx.get::<u32>().unwrap(), 2);
         assert_eq!(*registry.get::<u32>().unwrap(), 1);
         drop(tx);
@@ -1008,16 +954,16 @@ mod tests {
     #[test]
     fn a_transaction_refuses_a_slot_filled_before_it_began() {
         let registry = Registry::new();
-        registry.begin().insert(1_u32).unwrap();
+        registry.begin().insert(Arc::new(1_u32)).unwrap();
         let mut tx = registry.begin();
-        assert_eq!(tx.insert(2_u32).unwrap_err().into_value(), 2);
-        assert_eq!(*tx.get_or_insert_with(|| 3_u32), 1);
+        assert_eq!(*tx.insert(Arc::new(2_u32)).unwrap_err().into_value(), 2);
+        assert_eq!(*tx.get_or_insert_with(|| Arc::new(3_u32)), 1);
     }
 
     #[test]
     fn a_transaction_that_only_reads_publishes_nothing() {
         let registry = Registry::new();
-        registry.begin().insert(1_u32).unwrap();
+        registry.begin().insert(Arc::new(1_u32)).unwrap();
         let before = registry.get::<u32>().unwrap();
         {
             let tx = registry.begin();
@@ -1056,17 +1002,17 @@ mod tests {
         assert_buffers_agree(&registry);
         registry
             .begin()
-            .insert_for(StringKey(1), "one".into())
+            .insert_for(StringKey(1), string("one"))
             .unwrap();
         assert_buffers_agree(&registry);
         {
             let mut tx = registry.begin();
-            tx.insert_for(StringKey(2), "two".into()).unwrap();
-            tx.replace_for(StringKey(1), "uno".into());
-            tx.insert(7_u32).unwrap();
+            tx.insert_for(StringKey(2), string("two")).unwrap();
+            tx.replace_for(StringKey(1), string("uno"));
+            tx.insert(Arc::new(7_u32)).unwrap();
         }
         assert_buffers_agree(&registry);
-        registry.begin().replace(8_u32);
+        registry.begin().replace(Arc::new(8_u32));
         assert_buffers_agree(&registry);
         assert_eq!(*registry.get_for(&StringKey(1)).unwrap(), "uno");
         assert_eq!(*registry.get_for(&StringKey(2)).unwrap(), "two");
@@ -1081,7 +1027,7 @@ mod tests {
         // flight on this thread finishes either before or after, never
         // half way.
         let registry = Arc::new(Registry::new());
-        registry.begin().insert(0_u32).unwrap();
+        registry.begin().insert(Arc::new(0_u32)).unwrap();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = {
             let registry = Arc::clone(&registry);
@@ -1089,8 +1035,8 @@ mod tests {
             thread::spawn(move || {
                 for i in 1..=200_u32 {
                     let mut tx = registry.begin();
-                    tx.replace(i);
-                    tx.replace_for(StringKey(1), i.to_string());
+                    tx.replace(Arc::new(i));
+                    tx.replace_for(StringKey(1), Arc::new(i.to_string()));
                 }
                 stop.store(true, std::sync::atomic::Ordering::SeqCst);
             })

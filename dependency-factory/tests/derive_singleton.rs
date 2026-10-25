@@ -7,10 +7,10 @@ struct Config {
 }
 
 impl Singleton for Config {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Config {
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Config {
             greeting: "hello".into(),
-        })
+        }))
     }
 }
 
@@ -51,7 +51,7 @@ impl std::error::Error for Upstream {}
 struct Failing;
 
 impl Singleton for Failing {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -98,8 +98,8 @@ impl Key for DbKey {
 }
 
 impl Query for DbKey {
-    fn build(&self, _builder: &mut Builder) -> Result<String, BuildError> {
-        Ok(format!("db-{}", self.0))
+    fn build(&self, _builder: &mut Builder) -> Result<Arc<String>, BuildError> {
+        Ok(Arc::new(format!("db-{}", self.0)))
     }
 }
 

@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 /// One resource on the way to an error: the type of the value that was
 /// being built and, for a keyed resource, the key it was being built
@@ -161,36 +162,36 @@ impl fmt::Display for CycleError {
 
 impl Error for CycleError {}
 
-/// Returned by [`Transaction::insert`](crate::Transaction::insert),
-/// [`Transaction::insert_for`](crate::Transaction::insert_for) and their
-/// `_arc` variants when the slot is already filled. Carries the rejected
-/// value (the `Arc`, for the `_arc` variants) so the caller can recover
-/// it or fall back to [`Transaction::replace`](crate::Transaction::replace).
+/// Returned by [`Transaction::insert`](crate::Transaction::insert) and
+/// [`Transaction::insert_for`](crate::Transaction::insert_for) when the
+/// slot is already filled. Carries the rejected `Arc` so the caller can
+/// recover it or fall back to
+/// [`Transaction::replace`](crate::Transaction::replace).
 ///
 /// Implements [`Debug`](fmt::Debug) and [`Error`] without requiring the
 /// value to, so `unwrap` works for any registry value, and `?` converts it
 /// into a [`BuildError`] inside `build` methods.
-pub struct OccupiedError<V> {
-    value: V,
+pub struct OccupiedError<V: ?Sized> {
+    value: Arc<V>,
 }
 
-impl<V> OccupiedError<V> {
-    pub(crate) fn new(value: V) -> Self {
+impl<V: ?Sized> OccupiedError<V> {
+    pub(crate) fn new(value: Arc<V>) -> Self {
         Self { value }
     }
 
     /// The value that was not inserted.
-    pub fn value(&self) -> &V {
+    pub fn value(&self) -> &Arc<V> {
         &self.value
     }
 
     /// Recover the value that was not inserted.
-    pub fn into_value(self) -> V {
+    pub fn into_value(self) -> Arc<V> {
         self.value
     }
 }
 
-impl<V> fmt::Debug for OccupiedError<V> {
+impl<V: ?Sized> fmt::Debug for OccupiedError<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OccupiedError")
             .field("value_type", &std::any::type_name::<V>())
@@ -198,7 +199,7 @@ impl<V> fmt::Debug for OccupiedError<V> {
     }
 }
 
-impl<V> fmt::Display for OccupiedError<V> {
+impl<V: ?Sized> fmt::Display for OccupiedError<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -208,4 +209,4 @@ impl<V> fmt::Display for OccupiedError<V> {
     }
 }
 
-impl<V> Error for OccupiedError<V> {}
+impl<V: ?Sized> Error for OccupiedError<V> {}

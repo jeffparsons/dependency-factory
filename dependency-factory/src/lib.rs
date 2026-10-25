@@ -6,7 +6,7 @@ mod store;
 
 pub use builder::Builder;
 pub use error::{BuildError, CycleError, Frame, OccupiedError};
-pub use factory::{DependencyFactory, DependencyFactoryHandle, Provide, Query, Singleton};
+pub use factory::{DependencyFactory, DependencyFactoryHandle, Query, Singleton};
 pub use registry::{Key, Registry, Transaction};
 
 #[cfg(feature = "derive")]
@@ -22,14 +22,14 @@ mod tests {
     fn factory_reads_its_registry() {
         let factory = DependencyFactory::new();
         assert!(factory.get::<u32>().is_none());
-        factory.registry().begin().insert(42_u32).unwrap();
+        factory.registry().begin().insert(Arc::new(42_u32)).unwrap();
         assert_eq!(*factory.get::<u32>().unwrap(), 42);
     }
 
     #[test]
     fn factory_over_a_prepopulated_registry() {
         let registry = Arc::new(Registry::new());
-        registry.begin().insert(42_u32).unwrap();
+        registry.begin().insert(Arc::new(42_u32)).unwrap();
         let factory = DependencyFactory::with_registry(Arc::clone(&registry));
         assert!(Arc::ptr_eq(factory.registry(), &registry));
         assert_eq!(*factory.get::<u32>().unwrap(), 42);
@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn handle_can_resolve() {
         let factory = DependencyFactory::new();
-        factory.registry().begin().insert(42_u32).unwrap();
+        factory.registry().begin().insert(Arc::new(42_u32)).unwrap();
         let handle = factory.handle();
         assert_eq!(*handle.get::<u32>().unwrap().unwrap(), 42);
     }
@@ -47,7 +47,12 @@ mod tests {
     fn handle_exposes_the_registry() {
         let factory = DependencyFactory::new();
         let handle = factory.handle();
-        handle.registry().unwrap().begin().insert(42_u32).unwrap();
+        handle
+            .registry()
+            .unwrap()
+            .begin()
+            .insert(Arc::new(42_u32))
+            .unwrap();
         assert_eq!(*factory.get::<u32>().unwrap(), 42);
     }
 
@@ -65,7 +70,11 @@ mod tests {
         let factory = DependencyFactory::new();
         let h1 = factory.handle();
         let h2 = h1.clone();
-        h1.registry().unwrap().begin().insert(1_u32).unwrap();
+        h1.registry()
+            .unwrap()
+            .begin()
+            .insert(Arc::new(1_u32))
+            .unwrap();
         assert_eq!(*h2.get::<u32>().unwrap().unwrap(), 1);
     }
 
@@ -77,8 +86,8 @@ mod tests {
     }
 
     impl Query for StringKey {
-        fn build(&self, _builder: &mut Builder) -> Result<String, BuildError> {
-            Ok(format!("built-{}", self.0))
+        fn build(&self, _builder: &mut Builder) -> Result<Arc<String>, BuildError> {
+            Ok(Arc::new(format!("built-{}", self.0)))
         }
     }
 
@@ -86,10 +95,11 @@ mod tests {
     fn get_for_reads_the_registry() {
         let factory = DependencyFactory::new();
         assert!(factory.get_for(&StringKey(7)).is_none());
-        let inserted = factory
+        let inserted = Arc::new("seven".to_string());
+        factory
             .registry()
             .begin()
-            .insert_for(StringKey(7), "seven".to_string())
+            .insert_for(StringKey(7), Arc::clone(&inserted))
             .unwrap();
         let got = factory.get_for(&StringKey(7)).unwrap();
         assert!(Arc::ptr_eq(&inserted, &got));
@@ -113,10 +123,11 @@ mod tests {
     #[test]
     fn inserted_value_short_circuits_build_for() {
         let factory = DependencyFactory::new();
-        let inserted = factory
+        let inserted = Arc::new("by hand".to_string());
+        factory
             .registry()
             .begin()
-            .insert_for(StringKey(3), "by hand".into())
+            .insert_for(StringKey(3), Arc::clone(&inserted))
             .unwrap();
         let built = factory.get_or_build_for(StringKey(3)).unwrap();
         assert!(Arc::ptr_eq(&inserted, &built));
@@ -128,7 +139,7 @@ mod tests {
         factory
             .registry()
             .begin()
-            .insert_for(StringKey(1), "one".into())
+            .insert_for(StringKey(1), Arc::new("one".into()))
             .unwrap();
         let handle = factory.handle();
         assert_eq!(*handle.get_for(&StringKey(1)).unwrap().unwrap(), "one");

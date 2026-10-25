@@ -28,10 +28,6 @@ trait AnyMap: Any + Send + Sync {
     /// Move every entry into `into`, overwriting any already there under
     /// the same key.
     fn move_into(self: Box<Self>, into: &mut Store);
-    /// Whether an entry holds an `Arc` to the allocation at `ptr`, not
-    /// counting entries whose key `shadow`, a map for the same key type,
-    /// also has.
-    fn holds(&self, ptr: *const (), shadow: Option<&dyn AnyMap>) -> bool;
 }
 
 impl<K: Key> AnyMap for KeyMap<K> {
@@ -43,43 +39,19 @@ impl<K: Key> AnyMap for KeyMap<K> {
     fn move_into(self: Box<Self>, into: &mut Store) {
         into.map_mut::<K>().extend(*self);
     }
-
-    fn holds(&self, ptr: *const (), shadow: Option<&dyn AnyMap>) -> bool {
-        let shadow = shadow.map(|shadow| {
-            let any: &dyn Any = shadow;
-            any.downcast_ref::<KeyMap<K>>()
-                .expect("a store map is always stored under the TypeId of its own key type")
-        });
-        self.iter().any(|(key, value)| {
-            data_ptr(value) == ptr && !shadow.is_some_and(|shadow| shadow.contains_key(key))
-        })
-    }
 }
 
 /// A `Vec<Arc<T>>` behind a type-erased box, for the indexes of a
-/// [`Store`]: `Any` so lookups can downcast it, and enough else to be
-/// copied between stores and have one `Arc` removed without the caller
-/// knowing `T`.
+/// [`Store`]: `Any` so lookups can downcast it, and `clone_box` so it can
+/// be copied between stores without the caller knowing `T`.
 trait AnyIndex: Any + Send + Sync {
     /// A copy of the list. Entries are `Arc`s, so each is a refcount bump.
     fn clone_box(&self) -> Box<dyn AnyIndex>;
-    /// Whether the list holds an `Arc` to the allocation at `ptr`.
-    fn contains(&self, ptr: *const ()) -> bool;
-    /// Remove every `Arc` to the allocation at `ptr`.
-    fn remove(&mut self, ptr: *const ());
 }
 
 impl<T: ?Sized + Send + Sync + 'static> AnyIndex for Vec<Arc<T>> {
     fn clone_box(&self) -> Box<dyn AnyIndex> {
         Box::new(self.clone())
-    }
-
-    fn contains(&self, ptr: *const ()) -> bool {
-        self.iter().any(|arc| data_ptr(arc) == ptr)
-    }
-
-    fn remove(&mut self, ptr: *const ()) {
-        self.retain(|arc| data_ptr(arc) != ptr);
     }
 }
 
@@ -147,18 +119,6 @@ impl Store {
             .push(item);
     }
 
-    /// The `TypeId`s of every index this store holds.
-    pub(crate) fn index_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
-        self.indexes.keys().copied()
-    }
-
-    /// Whether the index with `TypeId` `id` holds an `Arc` to `ptr`.
-    pub(crate) fn index_contains(&self, id: TypeId, ptr: *const ()) -> bool {
-        self.indexes
-            .get(&id)
-            .is_some_and(|index| index.contains(ptr))
-    }
-
     /// Copy the index with `TypeId` `id` from `from` into this store,
     /// unless this store already has one or `from` has none. For an
     /// overlay about to change an index it has not touched yet.
@@ -169,23 +129,16 @@ impl Store {
         }
     }
 
-    /// Whether an entry of this store, or one of `under` that no entry of
-    /// this store shadows under the same key, holds an `Arc` to the
-    /// allocation at `ptr`. For a transaction's overlay over the buffer
-    /// it will commit into. Costs a pass over the entries.
-    pub(crate) fn holds(&self, ptr: *const (), under: &Store) -> bool {
-        self.maps.values().any(|map| map.holds(ptr, None))
-            || under
-                .maps
-                .iter()
-                .any(|(id, map)| map.holds(ptr, self.maps.get(id).map(Box::as_ref)))
-    }
-
-    /// Remove every `Arc` to `ptr` from every index in this store.
-    pub(crate) fn unindex(&mut self, ptr: *const ()) {
-        for index in self.indexes.values_mut() {
-            index.remove(ptr);
-        }
+    /// Remove every `Arc` to the allocation at `ptr` from the index for
+    /// `T`, if this store holds one.
+    pub(crate) fn unindex<T: ?Sized + Send + Sync + 'static>(&mut self, ptr: *const ()) {
+        let Some(index) = self.indexes.get_mut(&TypeId::of::<T>()) else {
+            return;
+        };
+        let any: &mut dyn Any = index.as_mut();
+        any.downcast_mut::<Vec<Arc<T>>>()
+            .expect("a store index is always stored under the TypeId of its own item type")
+            .retain(|arc| data_ptr(arc) != ptr);
     }
 
     /// Copy every entry and index of `self` into `into`, overwriting any
@@ -370,27 +323,33 @@ mod tests {
     }
 
     #[test]
-    fn unindex_removes_by_pointer_from_every_index() {
+    fn unindex_removes_by_pointer_from_one_index() {
         let one = Arc::new("one".to_string());
         let mut store = Store::default();
         store.index::<dyn Named>(Arc::clone(&one) as Arc<dyn Named>);
         store.index::<dyn Named>(Arc::new("two".to_string()));
+        store.index::<dyn Named>(Arc::clone(&one) as Arc<dyn Named>);
         store.index::<String>(Arc::clone(&one));
         // An equal but distinct value is not the same allocation.
         store.index::<String>(Arc::new("one".to_string()));
 
-        let named = TypeId::of::<dyn Named>();
-        assert!(store.index_contains(named, data_ptr(&one)));
-        assert!(!store.index_contains(named, data_ptr(&Arc::new(0_u8))));
-        assert!(!store.index_contains(TypeId::of::<u8>(), data_ptr(&one)));
-        assert_eq!(store.index_ids().count(), 2);
-
-        store.unindex(data_ptr(&one));
+        // Every appearance goes, from the one index.
+        store.unindex::<dyn Named>(data_ptr(&one));
         assert_eq!(names(store.indexed::<dyn Named>()), ["two"]);
+        assert_eq!(store.indexed::<String>().unwrap().len(), 2);
+        // An index for a type the store has none of, and a pointer the
+        // index does not hold, are no-ops.
+        store.unindex::<u8>(data_ptr(&one));
+        store.unindex::<String>(data_ptr(&Arc::new(0_u8)));
+        assert_eq!(store.indexed::<String>().unwrap().len(), 2);
+        assert!(store.indexed::<u8>().is_none());
+        // Only the same allocation matches.
+        store.unindex::<String>(data_ptr(&one));
         assert_eq!(store.indexed::<String>().unwrap().len(), 1);
         assert!(!Arc::ptr_eq(&store.indexed::<String>().unwrap()[0], &one));
         // An emptied index stays, empty.
-        store.unindex(data_ptr(&store.indexed::<String>().unwrap()[0].clone()));
+        let last = Arc::clone(&store.indexed::<String>().unwrap()[0]);
+        store.unindex::<String>(data_ptr(&last));
         assert!(store.indexed::<String>().unwrap().is_empty());
         assert!(!store.is_empty());
     }

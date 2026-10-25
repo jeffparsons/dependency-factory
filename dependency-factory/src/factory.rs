@@ -70,11 +70,10 @@ impl DependencyFactory {
         self.registry.get::<R>()
     }
 
-    /// Return the singleton instance of `R`, building it via
-    /// [`Provide::provide`] (`R::build`, for a [`Singleton`]) if it is not
-    /// already cached. A cache miss takes a [`Builder`] for the duration
-    /// of the call.
-    pub fn get_or_build<R: ?Sized + Provide>(&self) -> Result<Arc<R>, BuildError> {
+    /// Return the singleton instance of `R`, building it via `R::build`
+    /// if it is not already cached. A cache miss takes a [`Builder`] for
+    /// the duration of the call.
+    pub fn get_or_build<R: ?Sized + Singleton>(&self) -> Result<Arc<R>, BuildError> {
         self.handle().get_or_build()
     }
 
@@ -139,11 +138,10 @@ impl DependencyFactoryHandle {
         Ok(self.upgrade()?.get::<R>())
     }
 
-    /// Return the singleton instance of `R`, building it via
-    /// [`Provide::provide`] (`R::build`, for a [`Singleton`]) if it is not
-    /// already cached. A cache miss takes a [`Builder`] for the duration
-    /// of the call.
-    pub fn get_or_build<R: ?Sized + Provide>(&self) -> Result<Arc<R>, BuildError> {
+    /// Return the singleton instance of `R`, building it via `R::build`
+    /// if it is not already cached. A cache miss takes a [`Builder`] for
+    /// the duration of the call.
+    pub fn get_or_build<R: ?Sized + Singleton>(&self) -> Result<Arc<R>, BuildError> {
         let registry = self.upgrade()?;
         if let Some(arc) = registry.get::<R>() {
             return Ok(arc);
@@ -183,6 +181,15 @@ impl DependencyFactoryHandle {
 /// resource from a [`Builder`], which they use to resolve transitive
 /// dependencies.
 ///
+/// `build` returns the instance in an `Arc`, which is how the registry
+/// holds it. Usually that is `Ok(Arc::new(..))` around a freshly built
+/// value, and `#[derive(Singleton)]` writes exactly that. It need not be:
+/// a build may hand over an `Arc` it already holds, say from a pool, use
+/// [`Arc::new_cyclic`] to give the resource a `Weak` to itself, or
+/// resolve another singleton and return that very `Arc`, so that two
+/// slots share one instance. The last is how a trait object is bound to
+/// an implementation; see below.
+///
 /// `build` must be cheap and side-effect-free: no I/O, no blocking, no
 /// contended locking. Expensive setup belongs in the resource's own
 /// methods, which the application calls when it is ready to; a resource
@@ -190,13 +197,84 @@ impl DependencyFactoryHandle {
 /// as warming up or shutting down, makes itself findable by adding itself
 /// to an index in [`register`](Self::register). A resource that needs to
 /// look things up after assembly can store [`Builder::handle`].
-pub trait Singleton: Send + Sync + Sized + 'static {
-    fn build(builder: &mut Builder<'_>) -> Result<Self, BuildError>;
+///
+/// # Trait objects
+///
+/// `Self` may be a trait object: `impl Singleton for dyn Mailer` binds
+/// the trait to an implementation, and is what lets a resource depend on
+/// `Arc<dyn Mailer>` rather than on `Arc<Smtp>`, and lets a test put
+/// a fake in the slot before anything is built. The trait needs `Send`
+/// and `Sync` as supertraits, as a trait used for an index does. The
+/// usual body resolves the implementation's own singleton, so that both
+/// slots share one instance and the implementation's `register` runs:
+///
+/// ```
+/// use std::sync::Arc;
+/// use dependency_factory::{BuildError, Builder, DependencyFactory, Singleton};
+///
+/// trait Mailer: Send + Sync {
+///     fn transport(&self) -> &'static str;
+/// }
+///
+/// struct Smtp;
+///
+/// impl Singleton for Smtp {
+///     fn build(_: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+///         Ok(Arc::new(Smtp))
+///     }
+/// }
+///
+/// impl Mailer for Smtp {
+///     fn transport(&self) -> &'static str { "smtp" }
+/// }
+///
+/// impl Singleton for dyn Mailer {
+///     fn build(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+///         Ok(builder.get_or_build::<Smtp>()?)
+///     }
+/// }
+///
+/// struct Notifier {
+///     mailer: Arc<dyn Mailer>,
+/// }
+///
+/// impl Singleton for Notifier {
+///     fn build(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+///         // Or `#[derive(Singleton)]`, which writes exactly this.
+///         Ok(Arc::new(Notifier { mailer: builder.get_or_build()? }))
+///     }
+/// }
+///
+/// // In production the binding builds Smtp, once, for both slots.
+/// let factory = DependencyFactory::new();
+/// let notifier = factory.get_or_build::<Notifier>().unwrap();
+/// assert_eq!(notifier.mailer.transport(), "smtp");
+/// assert!(factory.get::<Smtp>().is_some());
+///
+/// // In a test a fake takes the slot, and Smtp is never built.
+/// struct FakeMailer;
+/// impl Mailer for FakeMailer {
+///     fn transport(&self) -> &'static str { "fake" }
+/// }
+/// let factory = DependencyFactory::new();
+/// factory.registry().begin().insert::<dyn Mailer>(Arc::new(FakeMailer)).unwrap();
+/// let notifier = factory.get_or_build::<Notifier>().unwrap();
+/// assert_eq!(notifier.mailer.transport(), "fake");
+/// assert!(factory.get::<Smtp>().is_none());
+/// ```
+///
+/// The body may pick the implementation at run time, from configuration
+/// it resolves through the builder.
+pub trait Singleton: Send + Sync + 'static {
+    /// The shared instance of `Self`, built or obtained through `builder`.
+    /// Runs when the singleton slot for `Self` is empty; the result is
+    /// cached there, so it runs at most once per registry.
+    fn build(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError>;
 
-    /// Runs once, right after the value `build` returned has been cached
-    /// as `this`, with the builder still open and before `get_or_build`
-    /// returns. It does not run for a value that was already present, or
-    /// for one inserted by hand.
+    /// Runs once, right after the `Arc` that `build` returned has been
+    /// cached as `this`, with the builder still open and before
+    /// `get_or_build` returns. It does not run for a value that was
+    /// already present, or for one inserted by hand.
     ///
     /// The usual body adds `this` to the indexes the resource belongs to,
     /// which is where the unsizing from `Arc<Self>` to `Arc<dyn Trait>`
@@ -210,8 +288,8 @@ pub trait Singleton: Send + Sync + Sized + 'static {
     /// # struct Cache;
     /// # impl WarmUp for Cache { fn warm_up(&self) {} }
     /// impl Singleton for Cache {
-    ///     fn build(_: &mut Builder<'_>) -> Result<Self, BuildError> {
-    ///         Ok(Cache)
+    ///     fn build(_: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+    ///         Ok(Arc::new(Cache))
     ///     }
     ///
     ///     fn register(this: &Arc<Self>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
@@ -235,122 +313,30 @@ pub trait Singleton: Send + Sync + Sized + 'static {
     }
 }
 
-/// What [`Builder::get_or_build`] can produce: the shared instance of
-/// `Self`, as an `Arc`. Every [`Singleton`] provides itself, through a
-/// blanket impl, so most code never names this trait.
-///
-/// Implement it by hand for a trait object, to bind the trait to an
-/// implementation. That is what lets a resource depend on
-/// `Arc<dyn Mailer>` rather than on `Arc<Smtp>`, and lets a test put
-/// a fake in the slot before anything is built. The trait needs `Send`
-/// and `Sync` as supertraits, as a trait used for an index does. The
-/// usual body resolves the implementation's own singleton, so that both
-/// slots share one instance and the implementation's
-/// [`register`](Singleton::register) runs:
-///
-/// ```
-/// use std::sync::Arc;
-/// use dependency_factory::{BuildError, Builder, DependencyFactory, Provide, Singleton};
-///
-/// trait Mailer: Send + Sync {
-///     fn transport(&self) -> &'static str;
-/// }
-///
-/// struct Smtp;
-///
-/// impl Singleton for Smtp {
-///     fn build(_: &mut Builder<'_>) -> Result<Self, BuildError> {
-///         Ok(Smtp)
-///     }
-/// }
-///
-/// impl Mailer for Smtp {
-///     fn transport(&self) -> &'static str { "smtp" }
-/// }
-///
-/// impl Provide for dyn Mailer {
-///     fn provide(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
-///         Ok(builder.get_or_build::<Smtp>()?)
-///     }
-/// }
-///
-/// struct Notifier {
-///     mailer: Arc<dyn Mailer>,
-/// }
-///
-/// impl Singleton for Notifier {
-///     fn build(builder: &mut Builder<'_>) -> Result<Self, BuildError> {
-///         // Or `#[derive(Singleton)]`, which writes exactly this.
-///         Ok(Notifier { mailer: builder.get_or_build()? })
-///     }
-/// }
-///
-/// // In production the binding builds Smtp, once, for both slots.
-/// let factory = DependencyFactory::new();
-/// let notifier = factory.get_or_build::<Notifier>().unwrap();
-/// assert_eq!(notifier.mailer.transport(), "smtp");
-/// assert!(factory.get::<Smtp>().is_some());
-///
-/// // In a test a fake takes the slot, and Smtp is never built.
-/// struct FakeMailer;
-/// impl Mailer for FakeMailer {
-///     fn transport(&self) -> &'static str { "fake" }
-/// }
-/// let factory = DependencyFactory::new();
-/// factory.registry().begin().insert_arc::<dyn Mailer>(Arc::new(FakeMailer)).unwrap();
-/// let notifier = factory.get_or_build::<Notifier>().unwrap();
-/// assert_eq!(notifier.mailer.transport(), "fake");
-/// assert!(factory.get::<Smtp>().is_none());
-/// ```
-///
-/// The body may pick the implementation at run time, from configuration
-/// it resolves through the builder. It need not go through a singleton
-/// at all, either: an impl for a sized type that is not a `Singleton` can
-/// hand over an `Arc` it gets from somewhere else.
-pub trait Provide: Send + Sync + 'static {
-    /// The shared instance of `Self`, built or obtained through `builder`.
-    /// Runs when the singleton slot for `Self` is empty; the result is
-    /// cached there, so it runs at most once per registry.
-    fn provide(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError>;
-
-    /// Runs once, right after the value `provide` returned has been
-    /// cached as `this`, as [`Singleton::register`] does, and under the
-    /// same rules. The default does nothing. For a `Singleton`, the
-    /// blanket impl forwards to its `register`.
-    fn register(this: &Arc<Self>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
-        let _ = (this, builder);
-        Ok(())
-    }
-}
-
-impl<S: Singleton> Provide for S {
-    fn provide(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
-        Ok(Arc::new(S::build(builder)?))
-    }
-
-    fn register(this: &Arc<Self>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
-        S::register(this, builder)
-    }
-}
-
 /// A keyed resource the factory can build: the implementor is the key
 /// value, and [`Key::Value`] is the resource produced for it. Multiple
 /// instances per value type may coexist, distinguished by the key value.
 /// Calling `get_or_build_for(key)` on the factory caches the produced
 /// value in the registry under that key.
 ///
+/// `build` returns the value in an `Arc`, as [`Singleton::build`] does
+/// and with the same freedoms: usually `Ok(Arc::new(..))`, but an `Arc`
+/// from anywhere will do, and `Value` may be a trait object.
+///
 /// `build` must be cheap and side-effect-free: no I/O, no blocking, no
 /// contended locking. Expensive setup belongs in the value's own methods,
 /// which the application calls when it is ready to; a value that should
 /// take part in a lifecycle event adds itself to an index in
 /// [`register`](Self::register).
-pub trait Query: Key<Value: Sized> {
-    fn build(&self, builder: &mut Builder<'_>) -> Result<Self::Value, BuildError>;
+pub trait Query: Key {
+    /// The value for this key, built or obtained through `builder`. Runs
+    /// when the slot for this key is empty; the result is cached there.
+    fn build(&self, builder: &mut Builder<'_>) -> Result<Arc<Self::Value>, BuildError>;
 
-    /// Runs once, right after the value `build` returned has been cached
-    /// as `value` under this key, with the builder still open and before
-    /// `get_or_build_for` returns. It does not run for a value that was
-    /// already present, or for one inserted by hand.
+    /// Runs once, right after the `Arc` that `build` returned has been
+    /// cached as `value` under this key, with the builder still open and
+    /// before `get_or_build_for` returns. It does not run for a value that
+    /// was already present, or for one inserted by hand.
     ///
     /// The same as [`Singleton::register`], with the key to hand: the
     /// usual body adds `value` to the indexes it belongs to, as

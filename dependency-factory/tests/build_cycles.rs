@@ -17,9 +17,9 @@ fn cycle_of(err: &BuildError) -> &CycleError {
 struct Selfish;
 
 impl Singleton for Selfish {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         let _self = builder.get_or_build::<Selfish>()?;
-        Ok(Selfish)
+        Ok(Arc::new(Selfish))
     }
 }
 
@@ -49,18 +49,18 @@ struct Beta {
 }
 
 impl Singleton for Alpha {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Alpha {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Alpha {
             b: builder.get_or_build::<Beta>()?,
-        })
+        }))
     }
 }
 
 impl Singleton for Beta {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Beta {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Beta {
             a: builder.get_or_build::<Alpha>()?,
-        })
+        }))
     }
 }
 
@@ -91,7 +91,7 @@ impl Key for TreeKey {
 }
 
 impl Query for TreeKey {
-    fn build(&self, builder: &mut Builder) -> Result<Tree, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<Arc<Tree>, BuildError> {
         match self.0 {
             1 => {
                 let _ = builder.get_or_build_for(TreeKey(2))?;
@@ -101,7 +101,7 @@ impl Query for TreeKey {
             }
             _ => {}
         }
-        Ok(Tree)
+        Ok(Arc::new(Tree))
     }
 }
 
@@ -142,7 +142,7 @@ impl Key for TenantKey {
 }
 
 impl Query for TenantKey {
-    fn build(&self, builder: &mut Builder) -> Result<String, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<Arc<String>, BuildError> {
         match self.region {
             // A different key of the same tenant, with the same hash.
             0 => {
@@ -160,7 +160,7 @@ impl Query for TenantKey {
             }
             _ => {}
         }
-        Ok(format!("{}-{}", self.id, self.region))
+        Ok(Arc::new(format!("{}-{}", self.id, self.region)))
     }
 }
 
@@ -196,9 +196,9 @@ impl Key for SelfishKey {
 }
 
 impl Query for SelfishKey {
-    fn build(&self, builder: &mut Builder) -> Result<(), BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<Arc<()>, BuildError> {
         builder.get_or_build_for(SelfishKey)?;
-        Ok(())
+        Ok(Arc::new(()))
     }
 }
 
@@ -222,11 +222,11 @@ impl Key for LinearKey {
 }
 
 impl Query for LinearKey {
-    fn build(&self, builder: &mut Builder) -> Result<Linear, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<Arc<Linear>, BuildError> {
         if self.0 < 3 {
             builder.get_or_build_for(LinearKey(self.0 + 1))?;
         }
-        Ok(Linear)
+        Ok(Arc::new(Linear))
     }
 }
 
@@ -244,9 +244,9 @@ fn linear_chain_of_distinct_keys_is_not_a_false_positive() {
 struct Hub;
 
 impl Singleton for Hub {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         builder.get_or_build_for(SpokeKey("only"))?;
-        Ok(Hub)
+        Ok(Arc::new(Hub))
     }
 }
 
@@ -261,9 +261,9 @@ impl Key for SpokeKey {
 }
 
 impl Query for SpokeKey {
-    fn build(&self, builder: &mut Builder) -> Result<Spoke, BuildError> {
+    fn build(&self, builder: &mut Builder) -> Result<Arc<Spoke>, BuildError> {
         builder.get_or_build::<Hub>()?;
-        Ok(Spoke)
+        Ok(Arc::new(Spoke))
     }
 }
 
@@ -284,13 +284,13 @@ struct Bridged {
 struct Bridgeable;
 
 impl Singleton for Bridgeable {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Bridgeable)
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Bridgeable))
     }
 }
 
 impl Singleton for Bridged {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         let local = builder.get_or_build::<Bridgeable>()?;
         // The test pre-inserts a handle to the *other* factory into this
         // one, so this build can recurse into a different factory while
@@ -301,7 +301,7 @@ impl Singleton for Bridged {
         // A different registry has its own lock, so this nested builder
         // does not wait on the one we hold.
         let remote = other.get_or_build::<Bridgeable>()?;
-        Ok(Bridged { local, remote })
+        Ok(Arc::new(Bridged { local, remote }))
     }
 }
 
@@ -312,7 +312,7 @@ fn frames_in_distinct_factories_do_not_collide() {
     factory_a
         .registry()
         .begin()
-        .insert(factory_b.handle())
+        .insert(Arc::new(factory_b.handle()))
         .unwrap();
 
     let bridged = factory_a
@@ -338,7 +338,7 @@ impl std::fmt::Display for Upstream {
 impl std::error::Error for Upstream {}
 
 impl Singleton for Failing {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -347,8 +347,8 @@ impl Singleton for Failing {
 struct OkResource;
 
 impl Singleton for OkResource {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(OkResource)
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(OkResource))
     }
 }
 

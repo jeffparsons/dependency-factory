@@ -12,6 +12,9 @@ trait Lifecycle: Send + Sync {
 
 trait Shutdown: Send + Sync {
     fn shutdown(&self);
+    fn shutdown_name(&self) -> &'static str {
+        "built"
+    }
 }
 
 fn names(index: Vec<Arc<dyn Lifecycle>>) -> Vec<String> {
@@ -23,8 +26,8 @@ fn names(index: Vec<Arc<dyn Lifecycle>>) -> Vec<String> {
 struct Config;
 
 impl Singleton for Config {
-    fn build(_: &mut Builder<'_>) -> Result<Self, BuildError> {
-        Ok(Config)
+    fn build(_: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Config))
     }
 }
 
@@ -41,14 +44,21 @@ impl Lifecycle for Db {
 
 impl Shutdown for Db {
     fn shutdown(&self) {}
+    fn shutdown_name(&self) -> &'static str {
+        if self.registered.load(Ordering::SeqCst) == 0 {
+            "hand-made"
+        } else {
+            "built"
+        }
+    }
 }
 
 impl Singleton for Db {
-    fn build(builder: &mut Builder<'_>) -> Result<Self, BuildError> {
-        Ok(Db {
+    fn build(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Db {
             _config: builder.get_or_build()?,
             registered: AtomicUsize::new(0),
-        })
+        }))
     }
 
     fn register(this: &Arc<Self>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
@@ -72,10 +82,10 @@ impl Lifecycle for Service {
 }
 
 impl Singleton for Service {
-    fn build(builder: &mut Builder<'_>) -> Result<Self, BuildError> {
-        Ok(Service {
+    fn build(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Service {
             _db: builder.get_or_build()?,
-        })
+        }))
     }
 
     fn register(this: &Arc<Self>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
@@ -136,17 +146,18 @@ fn a_held_builder_sees_its_own_index_additions_before_they_are_published() {
     assert_eq!(names(factory.indexed::<dyn Lifecycle>()), ["Db", "Service"]);
 }
 
+fn hand_made_db() -> Arc<Db> {
+    Arc::new(Db {
+        _config: Arc::new(Config),
+        registered: AtomicUsize::new(0),
+    })
+}
+
 #[test]
 fn a_hand_inserted_value_is_not_indexed_unless_the_caller_indexes_it() {
     let factory = DependencyFactory::new();
-    let db = factory
-        .registry()
-        .begin()
-        .insert(Db {
-            _config: Arc::new(Config),
-            registered: AtomicUsize::new(0),
-        })
-        .unwrap();
+    let db = hand_made_db();
+    factory.registry().begin().insert(Arc::clone(&db)).unwrap();
     factory.get_or_build::<Service>().unwrap();
     assert_eq!(db.registered.load(Ordering::SeqCst), 0);
     assert_eq!(names(factory.indexed::<dyn Lifecycle>()), ["Service"]);
@@ -156,15 +167,26 @@ fn a_hand_inserted_value_is_not_indexed_unless_the_caller_indexes_it() {
 }
 
 #[test]
-fn replacing_a_built_value_takes_it_out_of_its_indexes() {
+fn a_replaced_value_stays_in_its_indexes_until_the_caller_unindexes_it() {
     let factory = DependencyFactory::new();
     factory.get_or_build::<Service>().unwrap();
-    factory.registry().begin().replace(Db {
-        _config: Arc::new(Config),
-        registered: AtomicUsize::new(0),
-    });
-    assert_eq!(names(factory.indexed::<dyn Lifecycle>()), ["Service"]);
-    assert!(factory.indexed::<dyn Shutdown>().is_empty());
+    let fresh = hand_made_db();
+    let mut tx = factory.registry().begin();
+    let stale = tx.replace(Arc::clone(&fresh)).expect("Db was built");
+    // Replacing is a slot write; the indexes still list the old value.
+    assert_eq!(names(tx.indexed::<dyn Lifecycle>()), ["Db", "Service"]);
+    // The caller knows which indexes it was in, and swaps it out of each.
+    tx.unindex::<dyn Lifecycle>(Arc::clone(&stale) as Arc<dyn Lifecycle>);
+    tx.unindex::<dyn Shutdown>(stale);
+    tx.index::<dyn Lifecycle>(Arc::clone(&fresh) as Arc<dyn Lifecycle>);
+    tx.index::<dyn Shutdown>(fresh);
+    drop(tx);
+    assert_eq!(names(factory.indexed::<dyn Lifecycle>()), ["Service", "Db"]);
+    assert_eq!(factory.indexed::<dyn Shutdown>().len(), 1);
+    assert_eq!(
+        factory.indexed::<dyn Shutdown>()[0].shutdown_name(),
+        "hand-made"
+    );
 }
 
 #[test]
@@ -183,16 +205,16 @@ fn indexed_through_a_handle() {
 struct Listeners(Mutex<Vec<String>>);
 
 impl Singleton for Listeners {
-    fn build(_: &mut Builder<'_>) -> Result<Self, BuildError> {
-        Ok(Listeners::default())
+    fn build(_: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Listeners::default()))
     }
 }
 
 struct Announcer;
 
 impl Singleton for Announcer {
-    fn build(_: &mut Builder<'_>) -> Result<Self, BuildError> {
-        Ok(Announcer)
+    fn build(_: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Announcer))
     }
 
     fn register(_: &Arc<Self>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
@@ -226,8 +248,8 @@ impl std::error::Error for Refused {}
 struct Unregisterable;
 
 impl Singleton for Unregisterable {
-    fn build(_: &mut Builder<'_>) -> Result<Self, BuildError> {
-        Ok(Unregisterable)
+    fn build(_: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Unregisterable))
     }
 
     fn register(_: &Arc<Self>, _: &mut Builder<'_>) -> Result<(), BuildError> {
@@ -240,10 +262,10 @@ struct NeedsUnregisterable {
 }
 
 impl Singleton for NeedsUnregisterable {
-    fn build(builder: &mut Builder<'_>) -> Result<Self, BuildError> {
-        Ok(NeedsUnregisterable {
+    fn build(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(NeedsUnregisterable {
             _inner: builder.get_or_build()?,
-        })
+        }))
     }
 }
 
@@ -285,8 +307,8 @@ impl Key for ConnKey {
 }
 
 impl Query for ConnKey {
-    fn build(&self, _: &mut Builder<'_>) -> Result<Conn, BuildError> {
-        Ok(Conn { name: self.0 })
+    fn build(&self, _: &mut Builder<'_>) -> Result<Arc<Conn>, BuildError> {
+        Ok(Arc::new(Conn { name: self.0 }))
     }
 
     fn register(&self, value: &Arc<Conn>, builder: &mut Builder<'_>) -> Result<(), BuildError> {
