@@ -47,12 +47,12 @@ static SLOW_BUILDS: AtomicUsize = AtomicUsize::new(0);
 struct Slow;
 
 impl Singleton for Slow {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         SLOW_BUILDS.fetch_add(1, Ordering::SeqCst);
         // Sleep so the other threads' requests arrive while this build is
         // in progress.
         thread::sleep(Duration::from_millis(50));
-        Ok(Slow)
+        Ok(Arc::new(Slow))
     }
 }
 
@@ -93,13 +93,13 @@ impl Key for ExclusiveKey {
 }
 
 impl Query for ExclusiveKey {
-    fn build(&self, _builder: &mut Builder) -> Result<(), BuildError> {
+    fn build(&self, _builder: &mut Builder) -> Result<Arc<()>, BuildError> {
         if IN_BUILD.swap(true, Ordering::SeqCst) {
             OVERLAPPED.store(true, Ordering::SeqCst);
         }
         thread::sleep(Duration::from_millis(20));
         IN_BUILD.store(false, Ordering::SeqCst);
-        Ok(())
+        Ok(Arc::new(()))
     }
 }
 
@@ -135,18 +135,18 @@ struct Ping;
 struct Pong;
 
 impl Singleton for Ping {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         thread::sleep(Duration::from_millis(10));
         builder.get_or_build::<Pong>()?;
-        Ok(Ping)
+        Ok(Arc::new(Ping))
     }
 }
 
 impl Singleton for Pong {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         thread::sleep(Duration::from_millis(10));
         builder.get_or_build::<Ping>()?;
-        Ok(Pong)
+        Ok(Arc::new(Pong))
     }
 }
 
@@ -188,16 +188,16 @@ fn cycle_split_across_threads_is_reported_on_both() {
 struct Plain;
 
 impl Singleton for Plain {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Plain)
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Plain))
     }
 }
 
 struct Other;
 
 impl Singleton for Other {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Other)
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Other))
     }
 }
 
@@ -296,7 +296,7 @@ fn taking_a_builder_waits_for_the_other_thread_to_drop_its_builder() {
 fn get_never_waits_for_a_builder() {
     let _watchdog = watchdog();
     let factory = DependencyFactory::new();
-    factory.registry().begin().insert(7_u32).unwrap();
+    factory.registry().begin().insert(Arc::new(7_u32)).unwrap();
     let _builder = factory.builder();
     // Same thread, builder held: a lookup must neither wait nor error.
     assert_eq!(*factory.get::<u32>().unwrap(), 7);
@@ -310,11 +310,11 @@ struct ReadsViaHandle {
 }
 
 impl Singleton for ReadsViaHandle {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         // A read through a handle never takes the lock this builder
         // holds, so it is safe; it sees what was last published.
         let seen = builder.handle().get::<u32>()?;
-        Ok(ReadsViaHandle { seen })
+        Ok(Arc::new(ReadsViaHandle { seen }))
     }
 }
 
@@ -322,7 +322,7 @@ impl Singleton for ReadsViaHandle {
 fn reading_through_a_handle_inside_build_does_not_wait() {
     let _watchdog = watchdog();
     let factory = DependencyFactory::new();
-    factory.registry().begin().insert(7_u32).unwrap();
+    factory.registry().begin().insert(Arc::new(7_u32)).unwrap();
     let built = factory.get_or_build::<ReadsViaHandle>().unwrap();
     assert_eq!(built.seen.as_deref(), Some(&7));
 }
@@ -333,7 +333,7 @@ fn reading_through_a_handle_inside_build_does_not_wait() {
 struct Panicking;
 
 impl Singleton for Panicking {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         panic!("build blew up");
     }
 }
@@ -354,7 +354,7 @@ fn builder_is_released_when_a_build_panics() {
 struct PanicsAfterADependency;
 
 impl Singleton for PanicsAfterADependency {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         builder.get_or_build::<Plain>()?;
         panic!("after building Plain");
     }
@@ -376,7 +376,7 @@ fn dependencies_built_before_a_panic_are_discarded() {
 struct FailsAfterADependency;
 
 impl Singleton for FailsAfterADependency {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         builder.get_or_build::<Plain>()?;
         Err(std::io::Error::other("after building Plain").into())
     }

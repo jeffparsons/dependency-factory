@@ -7,7 +7,10 @@
 
 A type-safe dependency-injection container for Rust. Resources are
 auto-built on first request, cached as `Arc<T>`, and resolved recursively
-from their declared dependencies.
+from their declared dependencies. A `build` returns its resource in the
+`Arc` the registry will hold, so it can also hand over an `Arc` it got
+elsewhere, give the resource a `Weak` to itself with `Arc::new_cyclic`,
+or return another resource's `Arc` so that two slots share one instance.
 
 Two kinds of resources are supported:
 
@@ -31,7 +34,8 @@ Anything else can populate the same registry by hand through
 
 Every write goes through a transaction: `registry.begin()` returns a
 `Transaction` carrying `insert` (fails if the slot is taken), `replace`
-(overwrites) and `get_or_insert_with`. Its writes are published as one
+(overwrites, and hands back what it displaced) and `get_or_insert_with`,
+each taking the value in an `Arc`. Its writes are published as one
 batch when it commits, which dropping it does, so
 `registry.begin().insert(value)` is a single write and a held
 transaction is a batch; `commit()` says so explicitly, and `discard()`
@@ -59,11 +63,20 @@ builder still open. That is where `Arc<Resource>` becomes
 value implements. `#[derive(Singleton)]` writes the hook from a
 `#[factory(index(dyn Trait, ...))]` attribute. Whoever runs the event
 asks for `registry.indexed::<dyn Trait>()`. The index is published in
-the same batch as the value, a resource always follows its dependencies
-in it, and a replaced value leaves its indexes. A value inserted by hand
-is not indexed unless the caller adds it with `Transaction::index`. The
-crate holds no graph between resources and runs no hooks itself; what a
+the same batch as the value, and a resource always follows its
+dependencies in it. Indexes change only through `Transaction::index` and
+`Transaction::unindex`: a value inserted by hand is not indexed, and a
+replaced value is not unindexed, unless the caller does it. The crate
+holds no graph between resources and runs no hooks itself; what a
 lifecycle event is, and when it runs, is the application's business.
+
+A resource can depend on a trait rather than a type: `Arc<dyn Mailer>`
+names a singleton slot just as `Arc<Smtp>` does. Implement
+`Singleton for dyn Mailer` to bind the trait to an implementation,
+usually by resolving that implementation's own singleton and returning
+its `Arc`, so both slots share one instance. A test fills the slot
+first, with `insert::<dyn Mailer>(Arc::new(fake))`, and the real
+implementation is never built.
 
 ## Usage
 
@@ -87,8 +100,8 @@ struct Config {
 }
 
 impl Singleton for Config {
-    fn build(_: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Config { greeting: "hello".into() })
+    fn build(_: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Config { greeting: "hello".into() }))
     }
 }
 
@@ -103,7 +116,7 @@ assert_eq!(greeter.config.greeting, "hello");
 
 // A value placed in the registry by hand is used instead of building one.
 let factory = DependencyFactory::new();
-factory.registry().begin().insert(Config { greeting: "g'day".into() }).unwrap();
+factory.registry().begin().insert(Arc::new(Config { greeting: "g'day".into() })).unwrap();
 let greeter: Arc<Greeter> = factory.get_or_build().unwrap();
 assert_eq!(greeter.config.greeting, "g'day");
 ```
@@ -125,8 +138,8 @@ impl WarmUp for Cache {
 }
 
 impl Singleton for Cache {
-    fn build(_: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Cache)
+    fn build(_: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Cache))
     }
 
     fn register(this: &Arc<Self>, builder: &mut Builder) -> Result<(), BuildError> {

@@ -16,10 +16,10 @@ impl Key for DbKey {
 }
 
 impl Query for DbKey {
-    fn build(&self, _builder: &mut Builder) -> Result<Db, BuildError> {
-        Ok(Db {
+    fn build(&self, _builder: &mut Builder) -> Result<Arc<Db>, BuildError> {
+        Ok(Arc::new(Db {
             name: self.0.into(),
-        })
+        }))
     }
 }
 
@@ -38,11 +38,11 @@ impl Key for ServiceKey {
 }
 
 impl Query for ServiceKey {
-    fn build(&self, builder: &mut Builder) -> Result<Service, BuildError> {
-        Ok(Service {
+    fn build(&self, builder: &mut Builder) -> Result<Arc<Service>, BuildError> {
+        Ok(Arc::new(Service {
             db: builder.get_or_build_for(DbKey(self.0))?,
             label: self.0,
-        })
+        }))
     }
 }
 
@@ -76,15 +76,13 @@ fn build_for_caches_per_key() {
 #[test]
 fn pre_inserted_query_output_short_circuits_build() {
     let factory = DependencyFactory::new();
-    let custom = factory
+    let custom = Arc::new(Db {
+        name: "fake".into(),
+    });
+    factory
         .registry()
         .begin()
-        .insert_for(
-            DbKey("override"),
-            Db {
-                name: "fake".into(),
-            },
-        )
+        .insert_for(DbKey("override"), Arc::clone(&custom))
         .unwrap();
     let service = factory.get_or_build_for(ServiceKey("override")).unwrap();
     assert!(Arc::ptr_eq(&service.db, &custom));
@@ -113,7 +111,7 @@ impl Key for FailingKey {
 }
 
 impl Query for FailingKey {
-    fn build(&self, _builder: &mut Builder) -> Result<Failing, BuildError> {
+    fn build(&self, _builder: &mut Builder) -> Result<Arc<Failing>, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -132,10 +130,10 @@ impl Key for DependsOnFailingKey {
 }
 
 impl Query for DependsOnFailingKey {
-    fn build(&self, builder: &mut Builder) -> Result<DependsOnFailing, BuildError> {
-        Ok(DependsOnFailing {
+    fn build(&self, builder: &mut Builder) -> Result<Arc<DependsOnFailing>, BuildError> {
+        Ok(Arc::new(DependsOnFailing {
             f: builder.get_or_build_for(FailingKey)?,
-        })
+        }))
     }
 }
 
@@ -172,7 +170,7 @@ impl Key for RegionKey {
 }
 
 impl Query for RegionKey {
-    fn build(&self, _builder: &mut Builder) -> Result<Failing, BuildError> {
+    fn build(&self, _builder: &mut Builder) -> Result<Arc<Failing>, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -197,8 +195,8 @@ fn errors_name_the_key_a_value_was_built_for() {
 struct Clock;
 
 impl Singleton for Clock {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Clock)
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Clock))
     }
 }
 
@@ -215,11 +213,11 @@ impl Key for TimedDbKey {
 }
 
 impl Query for TimedDbKey {
-    fn build(&self, builder: &mut Builder) -> Result<TimedDb, BuildError> {
-        Ok(TimedDb {
+    fn build(&self, builder: &mut Builder) -> Result<Arc<TimedDb>, BuildError> {
+        Ok(Arc::new(TimedDb {
             _clock: builder.get_or_build::<Clock>()?,
             name: self.0.into(),
-        })
+        }))
     }
 }
 

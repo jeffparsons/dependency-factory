@@ -7,10 +7,10 @@ struct Config {
 }
 
 impl Singleton for Config {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Config {
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Config {
             greeting: "hello".into(),
-        })
+        }))
     }
 }
 
@@ -19,10 +19,10 @@ struct Greeter {
 }
 
 impl Singleton for Greeter {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Greeter {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Greeter {
             config: builder.get_or_build::<Config>()?,
-        })
+        }))
     }
 }
 
@@ -32,11 +32,11 @@ struct Service {
 }
 
 impl Singleton for Service {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(Service {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(Service {
             greeter: builder.get_or_build::<Greeter>()?,
             name: "world".into(),
-        })
+        }))
     }
 }
 
@@ -61,12 +61,13 @@ fn build_caches_each_resource() {
 #[test]
 fn pre_inserted_resource_short_circuits_build() {
     let factory = DependencyFactory::new();
-    let custom = factory
+    let custom = Arc::new(Config {
+        greeting: "g'day".into(),
+    });
+    factory
         .registry()
         .begin()
-        .insert(Config {
-            greeting: "g'day".into(),
-        })
+        .insert(Arc::clone(&custom))
         .unwrap();
     let greeter = factory.get_or_build::<Greeter>().unwrap();
     assert!(Arc::ptr_eq(&greeter.config, &custom));
@@ -88,7 +89,7 @@ impl std::fmt::Display for Upstream {
 impl std::error::Error for Upstream {}
 
 impl Singleton for Failing {
-    fn build(_builder: &mut Builder) -> Result<Self, BuildError> {
+    fn build(_builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
         Err(Upstream.into())
     }
 }
@@ -100,10 +101,10 @@ struct DependsOnFailing {
 }
 
 impl Singleton for DependsOnFailing {
-    fn build(builder: &mut Builder) -> Result<Self, BuildError> {
-        Ok(DependsOnFailing {
+    fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
+        Ok(Arc::new(DependsOnFailing {
             f: builder.get_or_build::<Failing>()?,
-        })
+        }))
     }
 }
 

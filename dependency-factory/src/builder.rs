@@ -35,7 +35,7 @@ impl<Q: Query> ErasedKey for Q {
     }
 }
 
-impl<R: Send + Sync + 'static> ErasedKey for SingletonKey<R> {
+impl<R: ?Sized + Send + Sync + 'static> ErasedKey for SingletonKey<R> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -135,7 +135,7 @@ impl<'a> Builder<'a> {
 
     /// Return the cached singleton instance of `R`, if one is present,
     /// including one this builder has committed and not yet published.
-    pub fn get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
+    pub fn get<R: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<R>> {
         self.transaction.get::<R>()
     }
 
@@ -147,31 +147,40 @@ impl<'a> Builder<'a> {
 
     /// Return the singleton instance of `R`, building it via `R::build`
     /// and then running [`R::register`](Singleton::register) if it is not
-    /// already cached.
-    pub fn get_or_build<R: Singleton>(&mut self) -> Result<Arc<R>, BuildError> {
-        if let Some(arc) = self.get::<R>() {
-            return Ok(arc);
-        }
-        let crumb = Crumb::new(&SingletonKey::<R>::new());
-        let value = self.with_frame(crumb.clone(), R::build)?;
-        let arc = self.transaction.get_or_insert_with(|| value);
-        self.with_frame(crumb, |builder| R::register(&arc, builder))?;
-        Ok(arc)
+    /// already cached. `R` may be a trait object with a [`Singleton`]
+    /// impl.
+    pub fn get_or_build<R: ?Sized + Singleton>(&mut self) -> Result<Arc<R>, BuildError> {
+        self.get_or_build_with(SingletonKey::<R>::new(), R::build, R::register)
     }
 
     /// Return the value for `query`, building it via `Q::build` and then
     /// running [`Q::register`](Query::register) if it is not already
     /// cached.
     pub fn get_or_build_for<Q: Query>(&mut self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
-        if let Some(arc) = self.get_for(&query) {
+        self.get_or_build_with(
+            query.clone(),
+            |builder| query.build(builder),
+            |arc, builder| query.register(arc, builder),
+        )
+    }
+
+    /// `get_or_build` and `get_or_build_for`, which differ only in how
+    /// the key is spelled: a cache hit returns at once; otherwise `build`
+    /// runs under the key's frame, what it returns is cached under `key`,
+    /// and `register` runs under the same frame.
+    fn get_or_build_with<K: Key + ErasedKey>(
+        &mut self,
+        key: K,
+        build: impl FnOnce(&mut Self) -> Result<Arc<K::Value>, BuildError>,
+        register: impl FnOnce(&Arc<K::Value>, &mut Self) -> Result<(), BuildError>,
+    ) -> Result<Arc<K::Value>, BuildError> {
+        if let Some(arc) = self.transaction.get_for(&key) {
             return Ok(arc);
         }
-        let crumb = Crumb::new(&query);
-        let value = self.with_frame(crumb.clone(), |builder| query.build(builder))?;
-        let arc = self
-            .transaction
-            .get_or_insert_with_for(query.clone(), || value);
-        self.with_frame(crumb, |builder| query.register(&arc, builder))?;
+        let crumb = Crumb::new(&key);
+        let arc = self.with_frame(crumb.clone(), build)?;
+        let arc = self.transaction.get_or_insert_with_for(key, || arc);
+        self.with_frame(crumb, |builder| register(&arc, builder))?;
         Ok(arc)
     }
 
@@ -179,6 +188,12 @@ impl<'a> Builder<'a> {
     /// [`Transaction::index`] does. What `register` hooks call.
     pub fn index<T: ?Sized + Send + Sync + 'static>(&mut self, item: Arc<T>) {
         self.transaction.index(item);
+    }
+
+    /// Remove `item` from the index for `T`, as [`Transaction::unindex`]
+    /// does.
+    pub fn unindex<T: ?Sized + Send + Sync + 'static>(&mut self, item: Arc<T>) {
+        self.transaction.unindex(item);
     }
 
     /// Return everything in the index for `T`, in the order it was added,

@@ -50,9 +50,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         impl #impl_generics ::dependency_factory::Singleton for #ident #ty_generics #where_clause {
             fn build(
                 builder: &mut ::dependency_factory::Builder<'_>,
-            ) -> ::core::result::Result<Self, ::dependency_factory::BuildError> {
+            ) -> ::core::result::Result<::std::sync::Arc<Self>, ::dependency_factory::BuildError> {
                 let _ = builder;
-                ::core::result::Result::Ok(#body)
+                ::core::result::Result::Ok(::std::sync::Arc::new(#body))
             }
 
             #register
