@@ -46,8 +46,8 @@ pub use registry::{Key, Registry, Transaction};
 /// }
 ///
 /// impl Singleton for Config {
-///     fn build(_: &mut Builder) -> Result<Self, BuildError> {
-///         Ok(Config { region: "north".into() })
+///     fn build(_: &mut Builder) -> Result<Arc<Self>, BuildError> {
+///         Ok(Arc::new(Config { region: "north".into() }))
 ///     }
 /// }
 ///
