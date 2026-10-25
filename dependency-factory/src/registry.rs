@@ -15,12 +15,15 @@ use crate::store::{Store, data_ptr};
 ///
 /// Implement `Key` alone for resources that are inserted by hand, and
 /// [`Query`](crate::Query) on top of it for resources the factory can build.
+/// `Value` may be unsized, a trait object say; such a value goes in as an
+/// `Arc`, through [`Transaction::insert_arc_for`], and `Query` is not for
+/// it.
 ///
 /// A key appears in error messages through its [`Debug`](fmt::Debug)
 /// impl, as in `while building Db for DbKey("users")`. A key that holds
 /// a secret should implement `Debug` by hand and leave the secret out.
 pub trait Key: fmt::Debug + Hash + Eq + Clone + Send + Sync + 'static {
-    type Value: Send + Sync + 'static;
+    type Value: ?Sized + Send + Sync + 'static;
 }
 
 /// Private nil-key adapter: identifies "the singleton instance of `R`" as a
@@ -58,7 +61,7 @@ impl<R: ?Sized> fmt::Debug for SingletonKey<R> {
     }
 }
 
-impl<R: Send + Sync + 'static> Key for SingletonKey<R> {
+impl<R: ?Sized + Send + Sync + 'static> Key for SingletonKey<R> {
     type Value = R;
 }
 
@@ -72,7 +75,11 @@ impl<R: Send + Sync + 'static> Key for SingletonKey<R> {
 ///
 /// Two kinds of entry share one mechanism: singletons, identified by their
 /// type alone (`insert`, `get`, ...), and keyed resources, identified by a
-/// [`Key`] value (`insert_for`, `get_for`, ...).
+/// [`Key`] value (`insert_for`, `get_for`, ...). The type may be a trait
+/// object: the singleton slot for `dyn Mailer` holds an
+/// `Arc<dyn Mailer>`, put there as an `Arc` by
+/// [`Transaction::insert_arc`] or by the factory through a
+/// [`Provide`](crate::Provide) impl.
 ///
 /// Alongside its entries a registry keeps *indexes*: for any `T`, usually
 /// a trait object such as `dyn WarmUp`, the list of `Arc<T>` that have
@@ -127,7 +134,7 @@ impl Registry {
     }
 
     /// Return the singleton instance of `R`, if one is present.
-    pub fn get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
+    pub fn get<R: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<R>> {
         self.get_for(&SingletonKey::<R>::new())
     }
 
@@ -182,7 +189,10 @@ impl fmt::Debug for Registry {
 /// an occupied one; `get_or_insert_with` fills an empty slot and otherwise
 /// returns what is there; `replace` overwrites. Replacing does not affect
 /// anyone already holding the previous `Arc`, but it does take the
-/// previous `Arc` out of every index it was in.
+/// previous `Arc` out of every index it was in, unless another slot still
+/// holds it. `insert_arc` and `replace_arc` take the value already in an
+/// `Arc`, which is how a value that is not sized, a trait object say,
+/// gets in, and how one `Arc` comes to sit in more than one slot.
 ///
 /// A fourth write, [`index`](Self::index), adds an `Arc` to the index for
 /// some `T`, which is the only way an index grows. Inserting a value by
@@ -204,7 +214,7 @@ pub struct Transaction<'a> {
 
 impl Transaction<'_> {
     /// Return the singleton instance of `R`, if one is present.
-    pub fn get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
+    pub fn get<R: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<R>> {
         self.get_for(&SingletonKey::<R>::new())
     }
 
@@ -222,6 +232,25 @@ impl Transaction<'_> {
     /// instance already present. Returns the new `Arc<R>`.
     pub fn replace<R: Send + Sync + 'static>(&mut self, value: R) -> Arc<R> {
         self.replace_for(SingletonKey::<R>::new(), value)
+    }
+
+    /// Store `value`, already in an `Arc`, as the singleton instance of
+    /// `R`, if there is none yet. Returns the cached `Arc<R>`, or the
+    /// rejected `value` wrapped in an [`OccupiedError`] if an instance was
+    /// already present. For an `R` that is not sized, a trait object say,
+    /// this is the only way in: `insert_arc::<dyn Mailer>(Arc::new(fake))`
+    /// coerces the `Arc` at the call site.
+    pub fn insert_arc<R: ?Sized + Send + Sync + 'static>(
+        &mut self,
+        value: Arc<R>,
+    ) -> Result<Arc<R>, OccupiedError<Arc<R>>> {
+        self.insert_arc_for(SingletonKey::<R>::new(), value)
+    }
+
+    /// Store `value`, already in an `Arc`, as the singleton instance of
+    /// `R`, overwriting any instance already present. Returns `value`.
+    pub fn replace_arc<R: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<R>) -> Arc<R> {
+        self.replace_arc_for(SingletonKey::<R>::new(), value)
     }
 
     /// Return the singleton instance of `R`, storing the result of `make`
@@ -246,23 +275,56 @@ impl Transaction<'_> {
         &mut self,
         key: K,
         value: K::Value,
-    ) -> Result<Arc<K::Value>, OccupiedError<K::Value>> {
+    ) -> Result<Arc<K::Value>, OccupiedError<K::Value>>
+    where
+        K::Value: Sized,
+    {
         if self.get_for(&key).is_some() {
             return Err(OccupiedError::new(value));
         }
-        Ok(self.replace_for(key, value))
+        Ok(self.replace_arc_for(key, Arc::new(value)))
     }
 
     /// Store `value` under `key`, overwriting any resource already there.
     /// Returns the new `Arc`. The previous `Arc`, if any, is removed from
-    /// every index it was in; the new one is not indexed.
-    pub fn replace_for<K: Key>(&mut self, key: K, value: K::Value) -> Arc<K::Value> {
-        if let Some(previous) = self.get_for(&key) {
-            self.unindex(data_ptr(&previous));
+    /// every index it was in unless another slot still holds it; the new
+    /// one is not indexed.
+    pub fn replace_for<K: Key>(&mut self, key: K, value: K::Value) -> Arc<K::Value>
+    where
+        K::Value: Sized,
+    {
+        self.replace_arc_for(key, Arc::new(value))
+    }
+
+    /// Store `value`, already in an `Arc`, under `key`, if the slot is
+    /// empty. Returns the cached `Arc`, or the rejected `value` wrapped in
+    /// an [`OccupiedError`] if the slot was already filled. The way in for
+    /// a key whose value is not sized.
+    pub fn insert_arc_for<K: Key>(
+        &mut self,
+        key: K,
+        value: Arc<K::Value>,
+    ) -> Result<Arc<K::Value>, OccupiedError<Arc<K::Value>>> {
+        if self.get_for(&key).is_some() {
+            return Err(OccupiedError::new(value));
         }
-        let arc = Arc::new(value);
-        self.overlay.insert(key, Arc::clone(&arc));
-        arc
+        Ok(self.replace_arc_for(key, value))
+    }
+
+    /// Store `value`, already in an `Arc`, under `key`, overwriting any
+    /// resource already there. Returns `value`. The previous `Arc`, if
+    /// any, is removed from every index it was in unless another slot
+    /// still holds it; the new one is not indexed.
+    pub fn replace_arc_for<K: Key>(&mut self, key: K, value: Arc<K::Value>) -> Arc<K::Value> {
+        let previous = self.get_for(&key);
+        self.overlay.insert(key, Arc::clone(&value));
+        if let Some(previous) = previous {
+            let ptr = data_ptr(&previous);
+            if !self.overlay.holds(ptr, &self.back) {
+                self.unindex(ptr);
+            }
+        }
+        value
     }
 
     /// Add `item` to the end of the index for `T`. `T` is usually a trait
@@ -327,10 +389,26 @@ impl Transaction<'_> {
         &mut self,
         key: K,
         make: impl FnOnce() -> K::Value,
+    ) -> Arc<K::Value>
+    where
+        K::Value: Sized,
+    {
+        match self.get_for(&key) {
+            Some(arc) => arc,
+            None => self.replace_arc_for(key, Arc::new(make())),
+        }
+    }
+
+    /// Return the resource stored under `key`, storing `value` first if the
+    /// slot is empty. What a [`Builder`](crate::Builder) commits with.
+    pub(crate) fn get_or_insert_arc_for<K: Key>(
+        &mut self,
+        key: K,
+        value: Arc<K::Value>,
     ) -> Arc<K::Value> {
         match self.get_for(&key) {
             Some(arc) => arc,
-            None => self.replace_for(key, make()),
+            None => self.replace_arc_for(key, value),
         }
     }
 
@@ -778,6 +856,107 @@ mod tests {
             .index::<dyn Named>(Arc::new("one".to_string()));
         registry.begin().replace(2_u32);
         assert_eq!(names(registry.indexed::<dyn Named>()), ["one"]);
+    }
+
+    // --- Unsized values, and one Arc in two slots ----------------------------
+
+    #[test]
+    fn insert_arc_fills_a_trait_object_slot() {
+        let registry = Registry::new();
+        let one: Arc<dyn Named> = Arc::new("one".to_string());
+        let stored = registry
+            .begin()
+            .insert_arc::<dyn Named>(Arc::clone(&one))
+            .unwrap();
+        assert!(Arc::ptr_eq(&stored, &one));
+        assert_eq!(registry.get::<dyn Named>().unwrap().name(), "one");
+        // Occupied like any other slot; the rejected Arc comes back.
+        let rejected = registry
+            .begin()
+            .insert_arc::<dyn Named>(Arc::new("two".to_string()))
+            .err()
+            .expect("the slot is occupied");
+        assert_eq!(rejected.into_value().name(), "two");
+        registry
+            .begin()
+            .replace_arc::<dyn Named>(Arc::new("three".to_string()));
+        assert_eq!(registry.get::<dyn Named>().unwrap().name(), "three");
+        assert!(registry.begin().get::<dyn Named>().is_some());
+    }
+
+    #[derive(Hash, Eq, PartialEq, Clone, Debug)]
+    struct Slot(u32);
+
+    impl Key for Slot {
+        type Value = dyn Named;
+    }
+
+    #[test]
+    fn a_key_may_have_an_unsized_value() {
+        let registry = Registry::new();
+        registry
+            .begin()
+            .insert_arc_for(Slot(1), Arc::new("one".to_string()))
+            .unwrap();
+        assert_eq!(registry.get_for(&Slot(1)).unwrap().name(), "one");
+        assert!(registry.get_for(&Slot(2)).is_none());
+        assert!(
+            registry
+                .begin()
+                .insert_arc_for(Slot(1), Arc::new("uno".to_string()))
+                .is_err()
+        );
+        registry
+            .begin()
+            .replace_arc_for(Slot(1), Arc::new("uno".to_string()));
+        assert_eq!(registry.get_for(&Slot(1)).unwrap().name(), "uno");
+    }
+
+    #[test]
+    fn replacing_one_of_two_slots_sharing_an_arc_keeps_its_indexes() {
+        let registry = Registry::new();
+        let shared = Arc::new("shared".to_string());
+        {
+            let mut tx = registry.begin();
+            tx.insert_arc(Arc::clone(&shared)).unwrap();
+            tx.insert_arc(Arc::clone(&shared) as Arc<dyn Named>)
+                .unwrap();
+            tx.index::<dyn Named>(Arc::clone(&shared) as Arc<dyn Named>);
+        }
+        // The other slot is in the back buffer.
+        registry
+            .begin()
+            .replace_arc::<dyn Named>(Arc::new("other".to_string()));
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["shared"]);
+        // Replacing the last slot that holds it takes it out.
+        registry.begin().replace("last".to_string());
+        assert!(registry.indexed::<dyn Named>().is_empty());
+    }
+
+    #[test]
+    fn replacing_within_one_transaction_sees_the_other_slot_in_the_overlay() {
+        let registry = Registry::new();
+        let shared = Arc::new("shared".to_string());
+        let mut tx = registry.begin();
+        tx.insert_arc(Arc::clone(&shared)).unwrap();
+        tx.insert_arc(Arc::clone(&shared) as Arc<dyn Named>)
+            .unwrap();
+        tx.index::<dyn Named>(Arc::clone(&shared) as Arc<dyn Named>);
+        tx.replace_arc::<dyn Named>(Arc::new("other".to_string()));
+        assert_eq!(names(tx.indexed::<dyn Named>()), ["shared"]);
+        tx.replace("last".to_string());
+        assert!(tx.indexed::<dyn Named>().is_empty());
+    }
+
+    #[test]
+    fn replacing_a_value_with_itself_keeps_its_indexes() {
+        let registry = Registry::new();
+        let value = registry.begin().insert("same".to_string()).unwrap();
+        registry
+            .begin()
+            .index::<dyn Named>(Arc::clone(&value) as Arc<dyn Named>);
+        registry.begin().replace_arc(Arc::clone(&value));
+        assert_eq!(names(registry.indexed::<dyn Named>()), ["same"]);
     }
 
     #[test]

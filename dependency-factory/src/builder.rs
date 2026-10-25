@@ -4,7 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 
 use crate::error::{BuildError, CycleError, Frame};
-use crate::factory::{DependencyFactoryHandle, Query, Singleton};
+use crate::factory::{DependencyFactoryHandle, Provide, Query};
 use crate::registry::{Key, Registry, SingletonKey, Transaction};
 
 /// A key held type-erased, so that crumbs compare with `Eq`. Comparing
@@ -35,7 +35,7 @@ impl<Q: Query> ErasedKey for Q {
     }
 }
 
-impl<R: Send + Sync + 'static> ErasedKey for SingletonKey<R> {
+impl<R: ?Sized + Send + Sync + 'static> ErasedKey for SingletonKey<R> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -74,7 +74,8 @@ impl Crumb {
 
 /// Exclusive access to build resources into a registry.
 ///
-/// A `Builder` is what [`Singleton::build`] and [`Query::build`] receive,
+/// A `Builder` is what [`Singleton::build`](crate::Singleton::build) and
+/// [`Query::build`] receive,
 /// and what they pass down when they resolve their own dependencies. It is
 /// a [`Transaction`] plus the record of which builds are in progress:
 /// taking one waits for any other transaction on the registry to end, so
@@ -135,7 +136,7 @@ impl<'a> Builder<'a> {
 
     /// Return the cached singleton instance of `R`, if one is present,
     /// including one this builder has committed and not yet published.
-    pub fn get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
+    pub fn get<R: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<R>> {
         self.transaction.get::<R>()
     }
 
@@ -145,16 +146,21 @@ impl<'a> Builder<'a> {
         self.transaction.get_for(query)
     }
 
-    /// Return the singleton instance of `R`, building it via `R::build`
-    /// and then running [`R::register`](Singleton::register) if it is not
-    /// already cached.
-    pub fn get_or_build<R: Singleton>(&mut self) -> Result<Arc<R>, BuildError> {
+    /// Return the singleton instance of `R`, building it via
+    /// [`R::provide`](Provide::provide), which for a
+    /// [`Singleton`](crate::Singleton) is
+    /// `R::build`, and then running [`R::register`](Provide::register) if
+    /// it is not already cached. `R` may be a trait object with a
+    /// [`Provide`] impl.
+    pub fn get_or_build<R: ?Sized + Provide>(&mut self) -> Result<Arc<R>, BuildError> {
         if let Some(arc) = self.get::<R>() {
             return Ok(arc);
         }
         let crumb = Crumb::new(&SingletonKey::<R>::new());
-        let value = self.with_frame(crumb.clone(), R::build)?;
-        let arc = self.transaction.get_or_insert_with(|| value);
+        let arc = self.with_frame(crumb.clone(), R::provide)?;
+        let arc = self
+            .transaction
+            .get_or_insert_arc_for(SingletonKey::<R>::new(), arc);
         self.with_frame(crumb, |builder| R::register(&arc, builder))?;
         Ok(arc)
     }

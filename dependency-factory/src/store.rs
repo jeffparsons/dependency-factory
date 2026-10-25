@@ -28,6 +28,10 @@ trait AnyMap: Any + Send + Sync {
     /// Move every entry into `into`, overwriting any already there under
     /// the same key.
     fn move_into(self: Box<Self>, into: &mut Store);
+    /// Whether an entry holds an `Arc` to the allocation at `ptr`, not
+    /// counting entries whose key `shadow`, a map for the same key type,
+    /// also has.
+    fn holds(&self, ptr: *const (), shadow: Option<&dyn AnyMap>) -> bool;
 }
 
 impl<K: Key> AnyMap for KeyMap<K> {
@@ -38,6 +42,17 @@ impl<K: Key> AnyMap for KeyMap<K> {
 
     fn move_into(self: Box<Self>, into: &mut Store) {
         into.map_mut::<K>().extend(*self);
+    }
+
+    fn holds(&self, ptr: *const (), shadow: Option<&dyn AnyMap>) -> bool {
+        let shadow = shadow.map(|shadow| {
+            let any: &dyn Any = shadow;
+            any.downcast_ref::<KeyMap<K>>()
+                .expect("a store map is always stored under the TypeId of its own key type")
+        });
+        self.iter().any(|(key, value)| {
+            data_ptr(value) == ptr && !shadow.is_some_and(|shadow| shadow.contains_key(key))
+        })
     }
 }
 
@@ -152,6 +167,18 @@ impl Store {
         {
             slot.insert(index.clone_box());
         }
+    }
+
+    /// Whether an entry of this store, or one of `under` that no entry of
+    /// this store shadows under the same key, holds an `Arc` to the
+    /// allocation at `ptr`. For a transaction's overlay over the buffer
+    /// it will commit into. Costs a pass over the entries.
+    pub(crate) fn holds(&self, ptr: *const (), under: &Store) -> bool {
+        self.maps.values().any(|map| map.holds(ptr, None))
+            || under
+                .maps
+                .iter()
+                .any(|(id, map)| map.holds(ptr, self.maps.get(id).map(Box::as_ref)))
     }
 
     /// Remove every `Arc` to `ptr` from every index in this store.

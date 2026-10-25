@@ -161,11 +161,11 @@ impl fmt::Display for CycleError {
 
 impl Error for CycleError {}
 
-/// Returned by [`Transaction::insert`](crate::Transaction::insert) and
-/// [`Transaction::insert_for`](crate::Transaction::insert_for) when the
-/// slot is already filled. Carries the rejected value so the caller can
-/// recover it or fall back to
-/// [`Transaction::replace`](crate::Transaction::replace).
+/// Returned by [`Transaction::insert`](crate::Transaction::insert),
+/// [`Transaction::insert_for`](crate::Transaction::insert_for) and their
+/// `_arc` variants when the slot is already filled. Carries the rejected
+/// value (the `Arc`, for the `_arc` variants) so the caller can recover
+/// it or fall back to [`Transaction::replace`](crate::Transaction::replace).
 ///
 /// Implements [`Debug`](fmt::Debug) and [`Error`] without requiring the
 /// value to, so `unwrap` works for any registry value, and `?` converts it

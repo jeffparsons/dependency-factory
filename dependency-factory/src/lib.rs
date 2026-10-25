@@ -6,7 +6,7 @@ mod store;
 
 pub use builder::Builder;
 pub use error::{BuildError, CycleError, Frame, OccupiedError};
-pub use factory::{DependencyFactory, DependencyFactoryHandle, Query, Singleton};
+pub use factory::{DependencyFactory, DependencyFactoryHandle, Provide, Query, Singleton};
 pub use registry::{Key, Registry, Transaction};
 
 #[cfg(feature = "derive")]

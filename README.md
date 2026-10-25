@@ -65,6 +65,14 @@ is not indexed unless the caller adds it with `Transaction::index`. The
 crate holds no graph between resources and runs no hooks itself; what a
 lifecycle event is, and when it runs, is the application's business.
 
+A resource can depend on a trait rather than a type: `Arc<dyn Mailer>`
+names a singleton slot just as `Arc<Smtp>` does. `get_or_build` works
+on anything that implements `Provide`, which every `Singleton` does;
+implement `Provide for dyn Mailer` by hand to bind the trait to an
+implementation, usually by resolving that implementation's own singleton,
+so both slots share one instance. A test fills the slot first, with
+`insert_arc`, and the real implementation is never built.
+
 ## Usage
 
 ```toml
