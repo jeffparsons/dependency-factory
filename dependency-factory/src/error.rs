@@ -44,8 +44,8 @@ impl fmt::Display for Frame {
 ///
 /// Carries a chain of `while building <frame>` [`Frame`]s pushed by the
 /// factory as it descends into transitive `build` calls, plus a boxed
-/// source error. The chain is empty for errors that did not originate
-/// inside a `build` call (for example, [`BuildError::factory_dropped`]).
+/// source error. The chain is empty for an error that has not yet passed
+/// through a `build`, such as one just converted with `?` inside one.
 ///
 /// `BuildError` deliberately does not implement [`std::error::Error`]: doing
 /// so would conflict with the blanket `From<E: Error + Send + Sync +
@@ -58,15 +58,6 @@ pub struct BuildError {
 }
 
 impl BuildError {
-    /// The owning [`crate::DependencyFactory`] has been dropped, so the
-    /// handle cannot resolve resources.
-    pub fn factory_dropped() -> Self {
-        Self {
-            chain: Vec::new(),
-            source: Box::new(FactoryDropped),
-        }
-    }
-
     /// The frames recorded as the error propagated up the build stack.
     /// The first element is the innermost (originating) resource; the
     /// last is the outermost.
@@ -114,17 +105,6 @@ where
         }
     }
 }
-
-#[derive(Debug)]
-struct FactoryDropped;
-
-impl fmt::Display for FactoryDropped {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("the DependencyFactory has been dropped")
-    }
-}
-
-impl Error for FactoryDropped {}
 
 /// A dependency cycle detected during recursive resolution. Carried as
 /// the source of a [`BuildError`] when a cycle is the root cause; users

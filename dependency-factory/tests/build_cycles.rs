@@ -297,7 +297,9 @@ impl Singleton for Bridged {
         // resolving the same Rust type.
         let other = builder
             .get::<DependencyFactoryHandle>()
-            .expect("test setup must insert the other factory's handle");
+            .expect("test setup must insert the other factory's handle")
+            .upgrade()
+            .expect("the other factory outlives this build");
         // A different registry has its own lock, so this nested builder
         // does not wait on the one we hold.
         let remote = other.get_or_build::<Bridgeable>()?;

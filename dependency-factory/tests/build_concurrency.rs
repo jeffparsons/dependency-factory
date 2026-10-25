@@ -220,8 +220,8 @@ fn builder_can_be_held_across_calls() {
 fn builder_can_be_taken_through_a_handle() {
     let factory = DependencyFactory::new();
     let handle = factory.handle();
-    let registry = handle.registry().unwrap();
-    let mut builder = Builder::new(&registry);
+    let upgraded = handle.upgrade().unwrap();
+    let mut builder = upgraded.builder();
     builder.get_or_build::<Plain>().unwrap();
     assert!(Arc::ptr_eq(builder.registry(), factory.registry()));
 }
@@ -234,7 +234,7 @@ fn what_a_builder_commits_is_published_when_it_drops() {
     // The builder sees its own commit; nobody else does yet.
     assert!(builder.get::<Plain>().is_some());
     assert!(factory.get::<Plain>().is_none());
-    assert!(factory.handle().get::<Plain>().unwrap().is_none());
+    assert!(factory.handle().upgrade().unwrap().get::<Plain>().is_none());
     drop(builder);
     assert!(Arc::ptr_eq(&built, &factory.get::<Plain>().unwrap()));
 }
@@ -300,7 +300,10 @@ fn get_never_waits_for_a_builder() {
     let _builder = factory.builder();
     // Same thread, builder held: a lookup must neither wait nor error.
     assert_eq!(*factory.get::<u32>().unwrap(), 7);
-    assert_eq!(*factory.handle().get::<u32>().unwrap().unwrap(), 7);
+    assert_eq!(
+        *factory.handle().upgrade().unwrap().get::<u32>().unwrap(),
+        7
+    );
 }
 
 // --- Reading through a handle inside a build -------------------------------
@@ -311,9 +314,13 @@ struct ReadsViaHandle {
 
 impl Singleton for ReadsViaHandle {
     fn build(builder: &mut Builder) -> Result<Arc<Self>, BuildError> {
-        // A read through a handle never takes the lock this builder
-        // holds, so it is safe; it sees what was last published.
-        let seen = builder.handle().get::<u32>()?;
+        // A read through an upgraded handle never takes the lock this
+        // builder holds, so it is safe; it sees what was last published.
+        let seen = builder
+            .handle()
+            .upgrade()
+            .expect("the factory is alive while it builds")
+            .get::<u32>();
         Ok(Arc::new(ReadsViaHandle { seen }))
     }
 }
@@ -408,10 +415,10 @@ fn breadcrumb_is_balanced_after_a_panic_inside_a_held_builder() {
 // --- Handles after teardown -------------------------------------------------
 
 #[test]
-fn handle_cannot_build_after_the_factory_is_dropped() {
+fn a_handle_cannot_upgrade_after_the_factory_is_dropped() {
     let factory = DependencyFactory::new();
     let handle = factory.handle();
+    assert!(handle.upgrade().is_some());
     drop(factory);
-    let err = handle.get_or_build::<Plain>().unwrap_err();
-    assert!(format!("{err}").contains("has been dropped"), "{err}");
+    assert!(handle.upgrade().is_none());
 }
