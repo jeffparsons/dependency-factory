@@ -93,10 +93,10 @@ impl Crumb {
 /// blocks inside `build` on something another thread will only do after
 /// taking a builder deadlocks. Keep `build` cheap, store dependencies
 /// rather than calling into them, and resolve through the builder you were
-/// given: a `get_or_build` through a stored [`DependencyFactoryHandle`] on
-/// the same thread asks for the lock this builder holds and waits forever.
-/// A `get` through a handle is fine; it reads what was last published
-/// and never waits on a build.
+/// given: a `get_or_build` on a factory upgraded from a stored
+/// [`DependencyFactoryHandle`], on the same thread, asks for the lock this
+/// builder holds and waits forever. A `get` on it is fine; it reads what
+/// was last published and never waits on a build.
 pub struct Builder<'a> {
     transaction: Transaction<'a>,
     registry: &'a Arc<Registry>,
@@ -125,8 +125,8 @@ impl<'a> Builder<'a> {
         self.registry
     }
 
-    /// A cheap-to-clone, weak handle to the factory, for resources that
-    /// need to look things up after they are built.
+    /// A weak handle to the factory, for resources that need to look
+    /// things up after they are built; see [`DependencyFactoryHandle`].
     pub fn handle(&self) -> DependencyFactoryHandle {
         DependencyFactoryHandle {
             registry: Arc::downgrade(self.registry),

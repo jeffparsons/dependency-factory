@@ -194,9 +194,11 @@ fn indexed_through_a_handle() {
     let factory = DependencyFactory::new();
     factory.get_or_build::<Db>().unwrap();
     let handle = factory.handle();
-    assert_eq!(names(handle.indexed::<dyn Lifecycle>().unwrap()), ["Db"]);
+    let upgraded = handle.upgrade().unwrap();
+    assert_eq!(names(upgraded.indexed::<dyn Lifecycle>()), ["Db"]);
     drop(factory);
-    assert!(handle.indexed::<dyn Lifecycle>().is_err());
+    drop(upgraded);
+    assert!(handle.upgrade().is_none());
 }
 
 // --- register may resolve other resources ------------------------------------

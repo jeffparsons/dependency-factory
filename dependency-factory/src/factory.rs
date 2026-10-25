@@ -4,10 +4,10 @@ use crate::builder::Builder;
 use crate::error::BuildError;
 use crate::registry::{Key, Registry};
 
-/// The owning factory. Holds its [`Registry`] alive; dropping it tears the
-/// factory down. Most code should pass [`DependencyFactoryHandle`] around
-/// instead, and reach for `DependencyFactory` only at the application's
-/// top level where ownership lives.
+/// A factory over a [`Registry`]: the registry, plus building. Dropping
+/// the last `DependencyFactory` for a registry drops the registry too,
+/// unless someone else holds its `Arc`. A factory is cheap to clone, and
+/// a clone is the same factory.
 ///
 /// The factory is one client of its registry: it reads the registry to
 /// short-circuit and commits what it builds through
@@ -22,8 +22,11 @@ use crate::registry::{Key, Registry};
 /// [`get_or_build`](Self::get_or_build) takes one for the duration of the
 /// call; [`builder`](Self::builder) hands one out to hold across several.
 ///
-/// Every operation forwards to a [`DependencyFactoryHandle`]; the owning
-/// type only adds the guarantee that the handle's upgrade succeeds.
+/// Most code should hold a [`DependencyFactoryHandle`] rather than a
+/// factory: a handle is weak, so a resource that stores one cannot keep
+/// its own registry alive or form a reference cycle, and it upgrades to
+/// a `DependencyFactory` for the scope that needs one.
+#[derive(Clone)]
 pub struct DependencyFactory {
     registry: Arc<Registry>,
 }
@@ -46,9 +49,10 @@ impl DependencyFactory {
         &self.registry
     }
 
-    /// A cheap-to-clone handle to this factory. Internally weak, so
-    /// storing a handle inside a resource cannot keep the registry alive
-    /// on its own and cannot create a reference cycle.
+    /// A weak handle to this factory, for resources that need to look
+    /// things up after they are built. Storing a handle inside a resource
+    /// cannot keep the registry alive on its own and cannot create a
+    /// reference cycle.
     pub fn handle(&self) -> DependencyFactoryHandle {
         DependencyFactoryHandle {
             registry: Arc::downgrade(&self.registry),
@@ -74,7 +78,10 @@ impl DependencyFactory {
     /// if it is not already cached. A cache miss takes a [`Builder`] for
     /// the duration of the call.
     pub fn get_or_build<R: ?Sized + Singleton>(&self) -> Result<Arc<R>, BuildError> {
-        self.handle().get_or_build()
+        if let Some(arc) = self.registry.get::<R>() {
+            return Ok(arc);
+        }
+        self.builder().get_or_build()
     }
 
     /// Return the cached value for `query`, if one is present. Never waits
@@ -87,7 +94,10 @@ impl DependencyFactory {
     /// not already cached. A cache miss takes a [`Builder`] for the
     /// duration of the call.
     pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
-        self.handle().get_or_build_for(query)
+        if let Some(arc) = self.registry.get_for(&query) {
+            return Ok(arc);
+        }
+        self.builder().get_or_build_for(query)
     }
 
     /// Return everything in the index for `T`, in the order it was added;
@@ -103,76 +113,50 @@ impl Default for DependencyFactory {
     }
 }
 
-/// A cheap-to-clone handle to a [`DependencyFactory`]'s registry. Holds a
-/// weak reference internally, so storing one inside a resource is always
-/// safe and never creates a reference cycle. Operations return
-/// [`BuildError::factory_dropped`] once the last `Arc` to the registry,
-/// normally the owning [`DependencyFactory`], has been dropped.
+/// A weak, cheap-to-clone handle to a [`DependencyFactory`]'s registry.
+/// Storing one inside a resource is always safe: it cannot keep the
+/// registry alive and cannot create a reference cycle. It does one thing,
+/// [`upgrade`](Self::upgrade) to a `DependencyFactory`, which fails once
+/// the last `DependencyFactory` for the registry has been dropped.
 ///
-/// To hold a [`Builder`] across several calls through a handle, upgrade
-/// it with [`registry`](Self::registry) and pass the result to
-/// [`Builder::new`].
+/// ```
+/// # use std::sync::Arc;
+/// # use dependency_factory::{BuildError, Builder, DependencyFactory, DependencyFactoryHandle, Singleton};
+/// # struct Config;
+/// # impl Singleton for Config {
+/// #     fn build(_: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> { Ok(Arc::new(Config)) }
+/// # }
+/// struct Lazy {
+///     factory: DependencyFactoryHandle,
+/// }
+///
+/// impl Lazy {
+///     fn config(&self) -> Option<Arc<Config>> {
+///         // A read never waits; a build would take the registry's lock.
+///         self.factory.upgrade()?.get::<Config>()
+///     }
+/// }
+///
+/// impl Singleton for Lazy {
+///     fn build(builder: &mut Builder<'_>) -> Result<Arc<Self>, BuildError> {
+///         Ok(Arc::new(Lazy { factory: builder.handle() }))
+///     }
+/// }
+/// ```
 #[derive(Clone)]
 pub struct DependencyFactoryHandle {
     pub(crate) registry: Weak<Registry>,
 }
 
 impl DependencyFactoryHandle {
-    fn upgrade(&self) -> Result<Arc<Registry>, BuildError> {
+    /// The factory this handle was taken from, or `None` if its registry
+    /// has been dropped. The result holds the registry alive for as long
+    /// as it lives, so take one for the scope that needs it rather than
+    /// storing it.
+    pub fn upgrade(&self) -> Option<DependencyFactory> {
         self.registry
             .upgrade()
-            .ok_or_else(BuildError::factory_dropped)
-    }
-
-    /// The registry behind this handle, or [`BuildError::factory_dropped`]
-    /// if it is gone.
-    pub fn registry(&self) -> Result<Arc<Registry>, BuildError> {
-        self.upgrade()
-    }
-
-    /// Return the cached singleton instance of `R`, if one is present.
-    /// `Ok(None)` means the registry is alive but no instance is cached;
-    /// `Err(_)` means the registry itself has been dropped. Never waits
-    /// for a builder.
-    pub fn get<R: ?Sized + Send + Sync + 'static>(&self) -> Result<Option<Arc<R>>, BuildError> {
-        Ok(self.upgrade()?.get::<R>())
-    }
-
-    /// Return the singleton instance of `R`, building it via `R::build`
-    /// if it is not already cached. A cache miss takes a [`Builder`] for
-    /// the duration of the call.
-    pub fn get_or_build<R: ?Sized + Singleton>(&self) -> Result<Arc<R>, BuildError> {
-        let registry = self.upgrade()?;
-        if let Some(arc) = registry.get::<R>() {
-            return Ok(arc);
-        }
-        Builder::new(&registry).get_or_build()
-    }
-
-    /// Return the cached value for `query`, if one is present.
-    /// `Ok(None)` means the registry is alive but no value is cached for
-    /// this key; `Err(_)` means the registry itself has been dropped.
-    /// Never waits for a builder.
-    pub fn get_for<Q: Query>(&self, query: &Q) -> Result<Option<Arc<Q::Value>>, BuildError> {
-        Ok(self.upgrade()?.get_for(query))
-    }
-
-    /// Return the value for `query`, building it via `Q::build` if it is
-    /// not already cached. A cache miss takes a [`Builder`] for the
-    /// duration of the call.
-    pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
-        let registry = self.upgrade()?;
-        if let Some(arc) = registry.get_for(&query) {
-            return Ok(arc);
-        }
-        Builder::new(&registry).get_or_build_for(query)
-    }
-
-    /// Return everything in the index for `T`, in the order it was added;
-    /// see [`Registry::indexed`]. `Err(_)` means the registry itself has
-    /// been dropped. Never waits for a builder.
-    pub fn indexed<T: ?Sized + Send + Sync + 'static>(&self) -> Result<Vec<Arc<T>>, BuildError> {
-        Ok(self.upgrade()?.indexed::<T>())
+            .map(|registry| DependencyFactory { registry })
     }
 }
 

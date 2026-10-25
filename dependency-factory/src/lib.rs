@@ -36,33 +36,36 @@ mod tests {
     }
 
     #[test]
-    fn handle_can_resolve() {
+    fn a_handle_upgrades_to_the_factory() {
         let factory = DependencyFactory::new();
         factory.registry().begin().insert(Arc::new(42_u32)).unwrap();
         let handle = factory.handle();
-        assert_eq!(*handle.get::<u32>().unwrap().unwrap(), 42);
+        let upgraded = handle.upgrade().unwrap();
+        assert!(Arc::ptr_eq(upgraded.registry(), factory.registry()));
+        assert_eq!(*upgraded.get::<u32>().unwrap(), 42);
     }
 
     #[test]
-    fn handle_exposes_the_registry() {
+    fn a_handle_does_not_upgrade_after_the_last_factory_is_dropped() {
         let factory = DependencyFactory::new();
         let handle = factory.handle();
-        handle
-            .registry()
-            .unwrap()
-            .begin()
-            .insert(Arc::new(42_u32))
-            .unwrap();
-        assert_eq!(*factory.get::<u32>().unwrap(), 42);
-    }
-
-    #[test]
-    fn handle_after_factory_dropped_errors() {
-        let factory = DependencyFactory::new();
-        let handle = factory.handle();
+        let clone = factory.clone();
         drop(factory);
-        assert!(handle.get::<u32>().is_err());
-        assert!(handle.registry().is_err());
+        assert!(handle.upgrade().is_some(), "a clone still holds it");
+        drop(clone);
+        assert!(handle.upgrade().is_none());
+    }
+
+    #[test]
+    fn an_upgraded_factory_holds_the_registry_alive() {
+        let factory = DependencyFactory::new();
+        let handle = factory.handle();
+        let upgraded = handle.upgrade().unwrap();
+        drop(factory);
+        upgraded.registry().begin().insert(Arc::new(1_u32)).unwrap();
+        assert_eq!(*handle.upgrade().unwrap().get::<u32>().unwrap(), 1);
+        drop(upgraded);
+        assert!(handle.upgrade().is_none());
     }
 
     #[test]
@@ -70,12 +73,13 @@ mod tests {
         let factory = DependencyFactory::new();
         let h1 = factory.handle();
         let h2 = h1.clone();
-        h1.registry()
+        h1.upgrade()
             .unwrap()
+            .registry()
             .begin()
             .insert(Arc::new(1_u32))
             .unwrap();
-        assert_eq!(*h2.get::<u32>().unwrap().unwrap(), 1);
+        assert_eq!(*h2.upgrade().unwrap().get::<u32>().unwrap(), 1);
     }
 
     #[derive(Debug, Hash, Eq, PartialEq, Clone)]
@@ -131,28 +135,5 @@ mod tests {
             .unwrap();
         let built = factory.get_or_build_for(StringKey(3)).unwrap();
         assert!(Arc::ptr_eq(&inserted, &built));
-    }
-
-    #[test]
-    fn handle_can_resolve_queries() {
-        let factory = DependencyFactory::new();
-        factory
-            .registry()
-            .begin()
-            .insert_for(StringKey(1), Arc::new("one".into()))
-            .unwrap();
-        let handle = factory.handle();
-        assert_eq!(*handle.get_for(&StringKey(1)).unwrap().unwrap(), "one");
-        let built = handle.get_or_build_for(StringKey(2)).unwrap();
-        assert_eq!(*built, "built-2");
-    }
-
-    #[test]
-    fn handle_after_factory_dropped_errors_for_queries() {
-        let factory = DependencyFactory::new();
-        let handle = factory.handle();
-        drop(factory);
-        assert!(handle.get_for(&StringKey(1)).is_err());
-        assert!(handle.get_or_build_for(StringKey(1)).is_err());
     }
 }

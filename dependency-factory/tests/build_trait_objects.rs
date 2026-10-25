@@ -143,10 +143,10 @@ fn a_binding_may_choose_the_implementation_at_run_time() {
 #[test]
 fn trait_object_slots_through_a_handle_and_a_held_builder() {
     let factory = DependencyFactory::new();
-    let handle = factory.handle();
-    assert!(handle.get::<dyn Mailer>().unwrap().is_none());
+    let handle = factory.handle().upgrade().unwrap();
+    assert!(handle.get::<dyn Mailer>().is_none());
     let mailer = handle.get_or_build::<dyn Mailer>().unwrap();
-    let seen = handle.get::<dyn Mailer>().unwrap().unwrap();
+    let seen = handle.get::<dyn Mailer>().unwrap();
     assert!(same_allocation(&seen, &mailer));
     let mut builder = factory.builder();
     assert!(same_allocation(
