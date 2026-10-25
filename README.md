@@ -25,6 +25,12 @@ and a keyed resource by its key, through the key's `Debug` impl. Cycles
 in the dependency graph are detected at runtime and surfaced as
 structured errors with the full path through the cycle.
 
+Inside `build`, errors are `BuildError`s, which `?` makes from any
+standard error. The factory returns a `ResolveError`
+instead, which is a standard error itself, so `?` carries it on into an
+`anyhow::Error`, a `Box<dyn Error>` or your own error type, with each
+resource that was being built as its own link in the `source` chain.
+
 Resources live in a `Registry`, a thread-safe type-keyed map that knows
 nothing about building. The factory is one client of its registry: it
 reads it to short-circuit and commits what it builds with

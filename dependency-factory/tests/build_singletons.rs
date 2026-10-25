@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use dependency_factory::{BuildError, Builder, DependencyFactory, Singleton};
 
+mod common;
+
 struct Config {
     greeting: String,
 }
@@ -122,7 +124,7 @@ fn errors_carry_a_chain_of_frames() {
     );
     // A singleton has no key to show.
     assert!(chain.iter().all(|frame| frame.key().is_none()));
-    let rendered = format!("{err}");
+    let rendered = common::report(&err);
     assert!(rendered.contains("DependsOnFailing"));
     assert!(rendered.contains("Failing"));
     assert!(rendered.contains("upstream is unavailable"));

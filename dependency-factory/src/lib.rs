@@ -5,7 +5,7 @@ mod registry;
 mod store;
 
 pub use builder::Builder;
-pub use error::{BuildError, CycleError, Frame, OccupiedError};
+pub use error::{BuildError, CycleError, Frame, OccupiedError, ResolveError};
 pub use factory::{DependencyFactory, DependencyFactoryHandle, Query, Singleton};
 pub use registry::{Key, Registry, Transaction};
 

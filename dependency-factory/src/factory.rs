@@ -2,7 +2,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Weak};
 
 use crate::builder::Builder;
-use crate::error::BuildError;
+use crate::error::{BuildError, ResolveError};
 use crate::registry::{Key, Registry};
 
 /// A factory over a [`Registry`]: the registry, plus building. It derefs
@@ -70,6 +70,10 @@ impl DependencyFactory {
     /// waiting for any other [`Builder`] or [`Transaction`] to end
     /// first. What the builder commits is published when it is dropped.
     ///
+    /// The builder's methods return a [`BuildError`], for use inside
+    /// `build`; here, convert one with [`ResolveError::from`] where you
+    /// need a standard error.
+    ///
     /// [`Transaction`]: crate::Transaction
     pub fn builder(&self) -> Builder<'_> {
         Builder::new(&self.registry)
@@ -78,21 +82,21 @@ impl DependencyFactory {
     /// Return the singleton instance of `R`, building it via `R::build`
     /// if it is not already cached. A cache miss takes a [`Builder`] for
     /// the duration of the call.
-    pub fn get_or_build<R: ?Sized + Singleton>(&self) -> Result<Arc<R>, BuildError> {
+    pub fn get_or_build<R: ?Sized + Singleton>(&self) -> Result<Arc<R>, ResolveError> {
         if let Some(arc) = self.registry.get::<R>() {
             return Ok(arc);
         }
-        self.builder().get_or_build()
+        Ok(self.builder().get_or_build()?)
     }
 
     /// Return the value for `query`, building it via `Q::build` if it is
     /// not already cached. A cache miss takes a [`Builder`] for the
     /// duration of the call.
-    pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, BuildError> {
+    pub fn get_or_build_for<Q: Query>(&self, query: Q) -> Result<Arc<Q::Value>, ResolveError> {
         if let Some(arc) = self.registry.get_for(&query) {
             return Ok(arc);
         }
-        self.builder().get_or_build_for(query)
+        Ok(self.builder().get_or_build_for(query)?)
     }
 }
 
